@@ -33,5 +33,7 @@ backend/keys/
 *.sln
 *.sw?
 .env
+.env
+
 __pycache__/
 requirements_orig.txt

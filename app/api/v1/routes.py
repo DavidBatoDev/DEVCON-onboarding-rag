@@ -105,11 +105,12 @@ async def rebuild_index(request: RebuildRequest):
     """Completely rebuild the RAG index from scratch (synchronous)
     
     This endpoint will:
-    1. Fetch all files from Google Drive
-    2. Process them into documents
-    3. Build a new index with all documents
-    4. Only clear the old index after successful rebuild
+    1. Clear all existing index data
+    2. Fetch all files from Google Drive
+    3. Process them into documents
+    4. Build a completely new index with fresh embeddings
     
+    Note: This will cause temporary downtime while rebuilding.
     Designed to run every 2 hours for complete index refresh.
     """
     with rebuild_lock:
@@ -126,7 +127,7 @@ async def rebuild_index(request: RebuildRequest):
         rebuild_state["last_status"] = "in_progress"
 
     try:
-        logger.info("🔄 Starting index rebuild (keeping current index until completion)...")
+        logger.info("🔄 Starting complete index rebuild from scratch...")
         start_time = time.time()
         
         if request.folder_id is None:
@@ -181,89 +182,33 @@ async def rebuild_index(request: RebuildRequest):
                 files_details=files_details
             )
         
-        # Step 3: Build new index with batch processing
-        logger.info(f"🚀 Building new RAG index with {len(documents)} documents...")
-        logger.info(f"Using batch size: {request.batch_size}")
+        # Step 3: Rebuild index completely from scratch
+        logger.info(f"🚀 Rebuilding RAG index from scratch with {len(documents)} documents...")
+        logger.info("🗑️ This will clear all existing data and rebuild with fresh embeddings")
         
-        # Create a new temporary index or use the service's rebuild functionality
-        # This depends on how your rag_service is implemented
-        success = True
-        
-        if len(documents) > request.batch_size:
-            # Process in batches
-            total_batches = (len(documents) + request.batch_size - 1) // request.batch_size
-            logger.info(f"Processing in {total_batches} batches")
-            
-            # Start building new index (this should create a new index without clearing the old one)
-            new_index_success = rag_service.start_new_index_build()
-            if not new_index_success:
-                logger.error("Failed to start new index build")
-                success = False
-            else:
-                for i in range(0, len(documents), request.batch_size):
-                    batch = documents[i:i + request.batch_size]
-                    batch_num = (i // request.batch_size) + 1
-                    
-                    logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} documents)")
-                    
-                    batch_success = rag_service.add_documents_to_new_index(batch)
-                    if not batch_success:
-                        logger.error(f"Failed to process batch {batch_num}")
-                        success = False
-                        break
-                    
-                    # Brief pause between batches for API rate limiting
-                    if batch_num < total_batches:
-                        time.sleep(1)
-        else:
-            # Process all at once
-            new_index_success = rag_service.start_new_index_build()
-            if new_index_success:
-                success = rag_service.add_documents_to_new_index(documents)
-            else:
-                success = False
+        # Use the simple rebuild method
+        success = rag_service.rebuild_index_from_scratch(documents)
         
         processing_time = time.time() - start_time
         
         if success:
-            # Step 4: Only now replace the old index with the new one
-            logger.info("🔄 Replacing old index with newly built index...")
-            replace_success = rag_service.replace_index_with_new()
-            
-            if replace_success:
-                logger.info(f"✅ Index rebuild completed successfully in {processing_time:.2f} seconds")
-                rebuild_state["last_status"] = "completed_success"
-                return RebuildResponse(
-                    status="completed",
-                    message=f"Successfully rebuilt index with {processed_count} documents",
-                    processed_files=processed_count,
-                    failed_files=failed_count,
-                    total_chunks=total_chunks,
-                    processing_time=processing_time,
-                    files_details=files_details
-                )
-            else:
-                logger.error("Failed to replace old index with new index")
-                rebuild_state["last_status"] = "failed_index_replacement"
-                return RebuildResponse(
-                    status="error",
-                    message="Failed to replace old index with newly built index",
-                    processed_files=processed_count,
-                    failed_files=failed_count,
-                    total_chunks=total_chunks,
-                    processing_time=processing_time,
-                    files_details=files_details
-                )
+            logger.info(f"✅ Index rebuild completed successfully in {processing_time:.2f} seconds")
+            rebuild_state["last_status"] = "completed_success"
+            return RebuildResponse(
+                status="completed",
+                message=f"Successfully rebuilt index from scratch with {processed_count} documents",
+                processed_files=processed_count,
+                failed_files=failed_count,
+                total_chunks=total_chunks,
+                processing_time=processing_time,
+                files_details=files_details
+            )
         else:
-            logger.error("Failed to build new index with documents")
-            rebuild_state["last_status"] = "failed_build"
-            # Clean up the failed new index attempt
-            if hasattr(rag_service, 'cleanup_failed_index_build'):
-                rag_service.cleanup_failed_index_build()
-            
+            logger.error("Failed to rebuild index from scratch")
+            rebuild_state["last_status"] = "failed_rebuild"
             return RebuildResponse(
                 status="error",
-                message="Failed to build new index with documents",
+                message="Failed to rebuild index from scratch",
                 processed_files=0,
                 failed_files=len(files),
                 processing_time=processing_time,
@@ -273,14 +218,6 @@ async def rebuild_index(request: RebuildRequest):
     except Exception as e:
         logger.error(f"Error during index rebuild: {e}")
         rebuild_state["last_status"] = f"error: {str(e)}"
-        
-        # Clean up any partial new index build
-        try:
-            if hasattr(rag_service, 'cleanup_failed_index_build'):
-                rag_service.cleanup_failed_index_build()
-        except Exception as cleanup_error:
-            logger.error(f"Error during cleanup: {cleanup_error}")
-        
         raise HTTPException(status_code=500, detail=f"Error during rebuild: {str(e)}")
     
     finally:
@@ -289,7 +226,6 @@ async def rebuild_index(request: RebuildRequest):
             rebuild_state["in_progress"] = False
             rebuild_state["last_completed"] = str(datetime.now())
             rebuild_state["last_duration"] = duration
-
 
 @router.delete("/index")
 async def clear_index():

@@ -24,7 +24,7 @@ class DEVCONPromptEngine:
                 title_list += f"\n• ... and {len(titles) - 10} more documents"
             
             # Enhanced anti-hallucination prompt
-            prompt = f"""🤖 You are the DEVCON Officers' Onboarding Assistant! You're here to help with chapter management and tech community building.
+            prompt = f"""🤖 You are the DEBBIE the DEVCON Officers' Onboarding Assistant! You're here to help with chapter management and tech community building.
 
 📋 RESPONSE GUIDELINES:
 1. ✅ Use the context provided below ONLY if it's helpful and relevant to answer the question
@@ -82,7 +82,7 @@ Remember to use emojis 😊 and be helpful while staying accurate to any informa
         
         full_context = "\n---\n".join(context_with_sources)
         
-        prompt = f"""🤖 Welcome to the DEVCON Officers' Onboarding Assistant! 
+        prompt = f"""🤖 Welcome to DEBBIE the DEVCON Officers' Onboarding Assistant! 
 
 Below is some context retrieved from documents. If it's helpful to answer the question or query, feel free to use it. Otherwise, ignore it and provide your best guidance! 📖✨
 

@@ -26,9 +26,32 @@ class IndexStatsResponse(BaseModel):
     error: str = None
 
 
+class FetchFilesRequest(BaseModel):
+    folder_id: str = None  # Optional: specific folder to fetch from
+
+
+class DriveFileInfo(BaseModel):
+    id: str
+    name: str
+    mime_type: str
+    size: int = None
+    modified_time: str = None
+    status: str = "available"  # available, processed, failed
+
+
+class FetchFilesResponse(BaseModel):
+    status: str
+    message: str
+    total_files: int = 0
+    supported_files: int = 0
+    files: List[DriveFileInfo] = []
+    processing_time: float = 0
+
+
 class RebuildRequest(BaseModel):
     folder_id: str = None  # Optional: specific folder to rebuild from
     batch_size: int = 25  # Batch size for processing
+    file_ids: List[str] = None  # Optional: specific files to process
 
 
 class RebuildResponse(BaseModel):
@@ -96,6 +119,76 @@ async def get_index_stats():
         )
 
 
+@router.post("/files/fetch", response_model=FetchFilesResponse)
+async def fetch_drive_files(request: FetchFilesRequest):
+    """Fetch and list files from Google Drive without processing them
+    
+    This endpoint will:
+    1. Connect to Google Drive
+    2. List all files in the specified folder
+    3. Return file information without processing or indexing
+    
+    Use this to see what files are available before deciding to rebuild the index.
+    """
+    try:
+        logger.info("📁 Fetching files from Google Drive...")
+        start_time = time.time()
+        
+        # Use provided folder_id or default
+        folder_id = request.folder_id or "1eocL8T8BH6EwnP5siOtDz3FG2CqGHveS"
+        
+        # Get files from Google Drive
+        files = get_drive_files(folder_id)
+        total_files = len(files)
+        
+        if not files:
+            return FetchFilesResponse(
+                status="success",
+                message="No files found in the specified folder",
+                total_files=0,
+                supported_files=0,
+                files=[],
+                processing_time=time.time() - start_time
+            )
+        
+        # Convert to response format
+        drive_files = []
+        for file in files:
+            drive_file = DriveFileInfo(
+                id=file.get("id", ""),
+                name=file.get("name", "Unknown"),
+                mime_type=file.get("mimeType", "Unknown"),
+                size=int(file.get("size", 0)) if file.get("size") else None,
+                modified_time=file.get("modifiedTime", ""),
+                status="available"
+            )
+            drive_files.append(drive_file)
+        
+        processing_time = time.time() - start_time
+        
+        logger.info(f"✅ Successfully fetched {total_files} files in {processing_time:.2f} seconds")
+        
+        return FetchFilesResponse(
+            status="success",
+            message=f"Successfully fetched {total_files} files from Google Drive",
+            total_files=total_files,
+            supported_files=total_files,  # All returned files are supported types
+            files=drive_files,
+            processing_time=processing_time
+        )
+    
+    except Exception as e:
+        logger.error(f"Error fetching files from Google Drive: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching files: {str(e)}")
+
+
+@router.get("/files/list")
+async def list_drive_files(folder_id: str = None):
+    """Simple endpoint to list files (alias for fetch with GET method)"""
+    request = FetchFilesRequest(folder_id=folder_id)
+    return await fetch_drive_files(request)
+
+
 @router.get("/rebuild/status")
 async def get_rebuild_status():
     """Get current rebuild status"""
@@ -104,16 +197,14 @@ async def get_rebuild_status():
 
 @router.post("/rebuild", response_model=RebuildResponse)
 async def rebuild_index(request: RebuildRequest):
-    """Completely rebuild the RAG index from scratch (synchronous)
+    """Rebuild the RAG index from Google Drive files
     
     This endpoint will:
-    1. Clear all existing index data
-    2. Fetch all files from Google Drive
-    3. Process them into documents
-    4. Build a completely new index with fresh embeddings
+    1. Fetch files from Google Drive (or use specific file_ids if provided)
+    2. Process them into documents
+    3. Build a new index with fresh embeddings
     
-    Note: This will cause temporary downtime while rebuilding.
-    Designed to run every 2 hours for complete index refresh.
+Note: Use /files/fetch first to see available files before rebuilding.
     """
     with rebuild_lock:
         if rebuild_state["in_progress"]:
@@ -129,17 +220,23 @@ async def rebuild_index(request: RebuildRequest):
         rebuild_state["last_status"] = "in_progress"
 
     try:
-        print("🔄 Starting complete index rebuild from scratch...", )
-        logger.info("🔄 Starting complete index rebuild from scratch...")
+        logger.info("🔄 Starting index rebuild...")
         start_time = time.time()
         
-        if request.folder_id is None:
-            request.folder_id = "1eocL8T8BH6EwnP5siOtDz3FG2CqGHveS"
+        # Use provided folder_id or default
+        folder_id = request.folder_id or "1eocL8T8BH6EwnP5siOtDz3FG2CqGHveS"
         
         # Step 1: Get files from Google Drive
         logger.info("📁 Fetching files from Google Drive...")
-        files = get_drive_files(request.folder_id)
-        logger.info(f"Found {len(files)} files to process")
+        all_files = get_drive_files(folder_id)
+        
+        # Filter files if specific file_ids are provided
+        if request.file_ids:
+            files = [f for f in all_files if f.get("id") in request.file_ids]
+            logger.info(f"Filtered to {len(files)} specific files out of {len(all_files)} total files")
+        else:
+            files = all_files
+            logger.info(f"Processing all {len(files)} files")
         
         if not files:
             rebuild_state["last_status"] = "completed_no_files"
@@ -185,11 +282,9 @@ async def rebuild_index(request: RebuildRequest):
                 files_details=files_details
             )
         
-        # Step 3: Rebuild index completely from scratch
-        logger.info(f"🚀 Rebuilding RAG index from scratch with {len(documents)} documents...")
-        logger.info("🗑️ This will clear all existing data and rebuild with fresh embeddings")
+        # Step 3: Rebuild index with processed documents
+        logger.info(f"🚀 Rebuilding RAG index with {len(documents)} documents...")
         
-        # Use the simple rebuild method
         success = rag_service.rebuild_index_from_scratch(documents)
         
         processing_time = time.time() - start_time
@@ -199,7 +294,7 @@ async def rebuild_index(request: RebuildRequest):
             rebuild_state["last_status"] = "completed_success"
             return RebuildResponse(
                 status="completed",
-                message=f"Successfully rebuilt index from scratch with {processed_count} documents",
+                message=f"Successfully rebuilt index with {processed_count} documents",
                 processed_files=processed_count,
                 failed_files=failed_count,
                 total_chunks=total_chunks,
@@ -207,11 +302,11 @@ async def rebuild_index(request: RebuildRequest):
                 files_details=files_details
             )
         else:
-            logger.error("Failed to rebuild index from scratch")
+            logger.error("Failed to rebuild index")
             rebuild_state["last_status"] = "failed_rebuild"
             return RebuildResponse(
                 status="error",
-                message="Failed to rebuild index from scratch",
+                message="Failed to rebuild index",
                 processed_files=0,
                 failed_files=len(files),
                 processing_time=processing_time,
@@ -229,6 +324,7 @@ async def rebuild_index(request: RebuildRequest):
             rebuild_state["in_progress"] = False
             rebuild_state["last_completed"] = str(datetime.now())
             rebuild_state["last_duration"] = duration
+
 
 @router.delete("/index")
 async def clear_index():

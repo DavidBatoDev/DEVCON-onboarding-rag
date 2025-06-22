@@ -33,7 +33,7 @@ Please provide a helpful and accurate response based on the context provided."""
         response = model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.2,
+                temperature=0.0,
                 max_output_tokens=1024,
             )
         )

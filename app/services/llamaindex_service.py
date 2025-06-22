@@ -254,13 +254,17 @@ class LlamaIndexRAGService:
             settings=ChromaSettings(anonymized_telemetry=False)
         )
         
-        # Get or create collection
+        # Get or create collection with NO embedding function
         collection_name = "devcon_documents_hf_client"  # Updated name for HF InferenceClient
         try:
             chroma_collection = chroma_client.get_collection(collection_name)
             print(f"✅ Loaded existing ChromaDB collection: {collection_name}")
         except:
-            chroma_collection = chroma_client.create_collection(collection_name)
+            # Create collection with NO embedding function - we'll provide pre-computed embeddings
+            chroma_collection = chroma_client.create_collection(
+                collection_name, 
+                embedding_function=None
+            )
             print(f"✅ Created new ChromaDB collection: {collection_name}")
         
         # Create vector store
@@ -268,6 +272,7 @@ class LlamaIndexRAGService:
         
         # Try to load existing index
         self._load_or_create_index()
+
     
     def _load_or_create_index(self):
         """Load existing index or create a new one"""
@@ -294,6 +299,7 @@ class LlamaIndexRAGService:
             self.index = VectorStoreIndex([], storage_context=storage_context)
         
         self._setup_query_engine()
+
     
     def _load_index_state(self):
         """Load index state tracking file modifications"""
@@ -306,6 +312,7 @@ class LlamaIndexRAGService:
             except Exception as e:
                 logger.error(f"Error loading index state: {e}")
     
+
     def save_index_state(self):
         """Save current index state to disk"""
         try:
@@ -757,6 +764,511 @@ class LlamaIndexRAGService:
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
+        
+
+    def start_new_index_build(self) -> bool:
+        """Start building a new index without affecting the current one"""
+        try:
+            # Create a new ChromaDB collection for the new index
+            chroma_client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            
+            # Use a temporary collection name
+            temp_collection_name = "devcon_documents_hf_client_temp"
+            
+            # Delete existing temp collection if it exists
+            try:
+                chroma_client.delete_collection(temp_collection_name)
+                logger.info(f"Deleted existing temp collection: {temp_collection_name}")
+            except Exception:
+                pass  # Collection doesn't exist, which is fine
+            
+            # Create new temporary collection with NO embedding function
+            # This is important - we'll provide pre-computed embeddings
+            self.temp_chroma_collection = chroma_client.create_collection(
+                temp_collection_name,
+                embedding_function=None
+            )
+            self.temp_vector_store = ChromaVectorStore(chroma_collection=self.temp_chroma_collection)
+            
+            # Create new temporary index
+            temp_storage_context = StorageContext.from_defaults(vector_store=self.temp_vector_store)
+            self.temp_index = VectorStoreIndex([], storage_context=temp_storage_context)
+            
+            # Initialize temporary index state
+            self.temp_index_state = {}
+            
+            logger.info("✅ Started new index build with temporary collection")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error starting new index build: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    def add_documents_to_new_index(self, documents: List[Document]) -> bool:
+        """Add documents to the new index being built"""
+        try:
+            if not hasattr(self, 'temp_index') or not self.temp_index:
+                logger.error("❌ Temporary index not initialized. Call start_new_index_build() first.")
+                return False
+            
+            # Sanitize metadata for all documents
+            logger.info("🧹 Sanitizing document metadata for ChromaDB compatibility...")
+            for doc in documents:
+                if hasattr(doc, 'metadata') and doc.metadata:
+                    doc.metadata = self._sanitize_metadata(doc.metadata)
+            
+            # Use sentence splitter for better chunking
+            parser = SentenceSplitter(
+                chunk_size=settings.CHUNK_SIZE,
+                chunk_overlap=settings.CHUNK_OVERLAP,
+            )
+            
+            # Parse documents into nodes
+            nodes = parser.get_nodes_from_documents(documents)
+            logger.info(f"📄 Created {len(nodes)} nodes from {len(documents)} documents")
+            
+            # Sanitize node metadata as well
+            for node in nodes:
+                if hasattr(node, 'metadata') and node.metadata:
+                    node.metadata = self._sanitize_metadata(node.metadata)
+            
+            # CRITICAL FIX: Explicitly generate embeddings for nodes before adding to temp index
+            logger.info("🔄 Generating embeddings for nodes...")
+            embed_model = LlamaSettings.embed_model
+            
+            # Process nodes in batches to avoid memory issues
+            batch_size = 10
+            for i in range(0, len(nodes), batch_size):
+                batch_nodes = nodes[i:batch_size + i]
+                logger.info(f"🔄 Processing embedding batch {i//batch_size + 1}/{(len(nodes) + batch_size - 1)//batch_size}")
+                
+                # Generate embeddings for this batch
+                for node in batch_nodes:
+                    if not hasattr(node, 'embedding') or node.embedding is None:
+                        # Generate embedding for the node text
+                        node.embedding = embed_model._get_text_embedding(node.text)
+                        logger.debug(f"Generated embedding for node: {len(node.embedding)} dims")
+            
+            # Add to temporary index - now with embeddings
+            logger.info("🔄 Adding nodes with embeddings to temporary index...")
+            self.temp_index.insert_nodes(nodes)
+            
+            # Update temporary index state
+            for doc in documents:
+                file_id = doc.metadata.get("file_id")
+                if file_id:
+                    self.temp_index_state[file_id] = {
+                        "file_id": file_id,
+                        "file_name": doc.metadata.get("source", "Unknown"),
+                        "title": doc.metadata.get("title", doc.metadata.get("source", "Unknown")),
+                        "modified_time": doc.metadata.get("modified_time"),
+                        "chunk_count": len([n for n in nodes if n.metadata.get("file_id") == file_id])
+                    }
+            
+            logger.info(f"✅ Added {len(documents)} documents with embeddings to temporary index")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error adding documents to new index: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    def replace_index_with_new(self) -> bool:
+        """Replace the current index with the newly built one"""
+        try:
+            if not hasattr(self, 'temp_index') or not self.temp_index:
+                logger.error("❌ No temporary index found to replace with")
+                return False
+            
+            # Get ChromaDB client
+            chroma_client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            
+            # Collection names
+            current_collection_name = "devcon_documents_hf_client"
+            temp_collection_name = "devcon_documents_hf_client_temp"
+            backup_collection_name = "devcon_documents_hf_client_backup"
+            
+            # Step 1: Backup current collection (if it exists)
+            backup_created = False
+            try:
+                current_collection = chroma_client.get_collection(current_collection_name)
+                # Delete existing backup if it exists
+                try:
+                    chroma_client.delete_collection(backup_collection_name)
+                except Exception:
+                    pass
+                
+                # Get all data from current collection
+                current_data = current_collection.get()
+                if current_data['ids']:
+                    # Create backup collection with NO embedding function - we'll provide embeddings
+                    backup_collection = chroma_client.create_collection(
+                        backup_collection_name, 
+                        embedding_function=None
+                    )
+                    
+                    # Check if data exists (avoid ambiguous truth value error)
+                    has_current_embeddings = current_data.get('embeddings') is not None and len(current_data.get('embeddings', [])) > 0
+                    has_current_metadatas = current_data.get('metadatas') is not None and len(current_data.get('metadatas', [])) > 0
+                    has_current_documents = current_data.get('documents') is not None and len(current_data.get('documents', [])) > 0
+                    
+                    # Add data to backup collection in batches to avoid memory issues
+                    batch_size = 100
+                    for i in range(0, len(current_data['ids']), batch_size):
+                        end_idx = min(i + batch_size, len(current_data['ids']))
+                        
+                        backup_collection.add(
+                            ids=current_data['ids'][i:end_idx],
+                            embeddings=current_data['embeddings'][i:end_idx] if has_current_embeddings else None,
+                            metadatas=current_data['metadatas'][i:end_idx] if has_current_metadatas else None,
+                            documents=current_data['documents'][i:end_idx] if has_current_documents else None
+                        )
+                    
+                    backup_created = True
+                    logger.info(f"✅ Backed up current collection with {len(current_data['ids'])} documents")
+            
+            except Exception as e:
+                logger.warning(f"⚠️ Could not backup current collection: {e}")
+                # Continue anyway - the temp index should still be valid
+            
+            # Step 2: FIXED - Get temp collection data and verify embeddings exist
+            try:
+                temp_collection = chroma_client.get_collection(temp_collection_name)
+                temp_data = temp_collection.get(include=['embeddings', 'metadatas', 'documents'])
+                
+                if not temp_data['ids']:
+                    logger.error("❌ Temporary collection is empty")
+                    return False
+                
+                # CRITICAL FIX: Check embeddings properly
+                embeddings_exist = False
+                if temp_data.get('embeddings') is not None:
+                    # Check if we have embeddings and they're not empty
+                    if len(temp_data['embeddings']) > 0:
+                        # Check if the first embedding is not None/empty
+                        first_embedding = temp_data['embeddings'][0]
+                        if first_embedding is not None and len(first_embedding) > 0:
+                            embeddings_exist = True
+                
+                if not embeddings_exist:
+                    logger.error("❌ Temporary collection has no embeddings!")
+                    logger.info("🔄 Attempting to regenerate embeddings from temp collection...")
+                    
+                    # Try to regenerate embeddings from the documents in temp collection
+                    if temp_data.get('documents') and len(temp_data['documents']) > 0:
+                        embed_model = LlamaSettings.embed_model
+                        regenerated_embeddings = []
+                        
+                        logger.info(f"🔄 Regenerating embeddings for {len(temp_data['documents'])} documents...")
+                        for idx, doc_text in enumerate(temp_data['documents']):
+                            if doc_text and doc_text.strip():
+                                try:
+                                    embedding = embed_model._get_text_embedding(doc_text)
+                                    regenerated_embeddings.append(embedding)
+                                    if (idx + 1) % 10 == 0:
+                                        logger.info(f"🔄 Regenerated {idx + 1}/{len(temp_data['documents'])} embeddings")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Failed to generate embedding for document {idx}: {e}")
+                                    # Use zero embedding as fallback
+                                    regenerated_embeddings.append([0.0] * 1024)
+                            else:
+                                logger.warning(f"⚠️ Found empty document text at index {idx}, using zero embedding")
+                                regenerated_embeddings.append([0.0] * 1024)
+                        
+                        temp_data['embeddings'] = regenerated_embeddings
+                        logger.info(f"✅ Regenerated {len(regenerated_embeddings)} embeddings")
+                    else:
+                        logger.error("❌ No documents found in temp collection to regenerate embeddings")
+                        return False
+                
+                logger.info(f"✅ Temp collection has {len(temp_data['ids'])} documents with embeddings")
+                    
+            except Exception as e:
+                logger.error(f"❌ Could not retrieve temp collection data: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+            
+            # Step 3: Delete current collection
+            try:
+                chroma_client.delete_collection(current_collection_name)
+                logger.info(f"✅ Deleted current collection: {current_collection_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not delete current collection: {e}")
+            
+            # Step 4: Create new current collection and copy data with embeddings
+            try:
+                # Create new current collection with NO embedding function
+                new_current_collection = chroma_client.create_collection(
+                    current_collection_name, 
+                    embedding_function=None
+                )
+                
+                # Copy data from temp to new current collection in batches
+                batch_size = 100
+                total_batches = (len(temp_data['ids']) + batch_size - 1) // batch_size
+                
+                # Check if embeddings exist (avoid ambiguous truth value error)
+                has_embeddings = temp_data.get('embeddings') is not None and len(temp_data.get('embeddings', [])) > 0
+                has_metadatas = temp_data.get('metadatas') is not None and len(temp_data.get('metadatas', [])) > 0
+                has_documents = temp_data.get('documents') is not None and len(temp_data.get('documents', [])) > 0
+                
+                for i in range(0, len(temp_data['ids']), batch_size):
+                    end_idx = min(i + batch_size, len(temp_data['ids']))
+                    batch_num = i // batch_size + 1
+                    
+                    # Prepare batch data - avoid ambiguous truth value errors
+                    batch_ids = temp_data['ids'][i:end_idx]
+                    batch_embeddings = temp_data['embeddings'][i:end_idx] if has_embeddings else None
+                    batch_metadatas = temp_data['metadatas'][i:end_idx] if has_metadatas else None
+                    batch_documents = temp_data['documents'][i:end_idx] if has_documents else None
+                    
+                    # FIXED: Properly check embeddings without ambiguous truth value error
+                    if batch_embeddings is None or len(batch_embeddings) == 0:
+                        logger.error(f"❌ No embeddings found in temp collection batch {i}-{end_idx}")
+                        raise Exception("Temp collection missing embeddings")
+                    
+                    # Verify embedding dimensions - check each embedding individually
+                    for idx, embedding in enumerate(batch_embeddings):
+                        if embedding is None:
+                            logger.error(f"❌ None embedding at index {i + idx}")
+                            raise Exception(f"None embedding at index {i + idx}")
+                        
+                        # Convert to list if it's a numpy array to avoid ambiguous truth value
+                        embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else embedding
+                        if not embedding_list or len(embedding_list) == 0:
+                            logger.error(f"❌ Empty embedding at index {i + idx}")
+                            raise Exception(f"Empty embedding at index {i + idx}")
+                    
+                    new_current_collection.add(
+                        ids=batch_ids,
+                        embeddings=batch_embeddings,
+                        metadatas=batch_metadatas,
+                        documents=batch_documents
+                    )
+                    
+                    logger.info(f"✅ Added batch {batch_num}/{total_batches} with {len(batch_ids)} documents")
+                
+                logger.info(f"✅ Created new current collection with {len(temp_data['ids'])} documents")
+                
+            except Exception as e:
+                logger.error(f"❌ Error creating new current collection: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # Try to restore from backup if we created one
+                if backup_created:
+                    logger.info("🔄 Attempting to restore from backup...")
+                    try:
+                        self._restore_from_backup()
+                        logger.info("✅ Restored from backup after failed replacement")
+                    except Exception as restore_error:
+                        logger.error(f"❌ Failed to restore from backup: {restore_error}")
+                
+                return False
+            
+            # Step 5: Update service to use new collection
+            try:
+                self.vector_store = ChromaVectorStore(chroma_collection=new_current_collection)
+                
+                # Create new index with the new vector store
+                storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+                self.index = VectorStoreIndex([], storage_context=storage_context)
+                
+                # Update index state
+                self.index_state = self.temp_index_state.copy()
+                self.save_index_state()
+                
+                # Setup query engine with new index
+                self._setup_query_engine()
+                
+                # Persist the new index
+                self.persist_index()
+                
+                logger.info("✅ Updated service to use new index")
+                
+            except Exception as e:
+                logger.error(f"❌ Error updating service with new index: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+            
+            # Step 6: Cleanup temp collection
+            try:
+                chroma_client.delete_collection(temp_collection_name)
+                logger.info(f"✅ Cleaned up temporary collection: {temp_collection_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not delete temp collection: {e}")
+            
+            # Step 7: Cleanup temp variables
+            self.cleanup_temp_variables()
+            
+            logger.info("✅ Successfully replaced current index with new index")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error replacing index with new: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to restore from backup if possible
+            try:
+                self._restore_from_backup()
+            except Exception as restore_error:
+                logger.error(f"❌ Failed to restore from backup: {restore_error}")
+            
+            return False
+
+
+    def cleanup_failed_index_build(self):
+        """Clean up resources from a failed index build attempt"""
+        try:
+            logger.info("🧹 Cleaning up failed index build...")
+            
+            # Delete temporary collection if it exists
+            if hasattr(self, 'temp_chroma_collection'):
+                try:
+                    chroma_client = chromadb.PersistentClient(
+                        path=settings.CHROMA_PERSIST_DIR,
+                        settings=ChromaSettings(anonymized_telemetry=False)
+                    )
+                    chroma_client.delete_collection("devcon_documents_hf_client_temp")
+                    logger.info("✅ Deleted temporary collection")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not delete temp collection: {e}")
+            
+            # Cleanup temp variables
+            self.cleanup_temp_variables()
+            
+            logger.info("✅ Cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"❌ Error during cleanup: {e}")
+
+    def cleanup_temp_variables(self):
+        """Clean up temporary variables used during index rebuild"""
+        temp_vars = ['temp_index', 'temp_vector_store', 'temp_chroma_collection', 'temp_index_state']
+        for var in temp_vars:
+            if hasattr(self, var):
+                delattr(self, var)
+                logger.debug(f"Cleaned up temp variable: {var}")
+
+    def _restore_from_backup(self):
+        """Restore the index from backup collection (emergency recovery)"""
+        try:
+            logger.info("🔄 Attempting to restore from backup...")
+            
+            chroma_client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            
+            backup_collection_name = "devcon_documents_hf_client_backup"
+            current_collection_name = "devcon_documents_hf_client"
+            
+            # Check if backup exists
+            try:
+                backup_collection = chroma_client.get_collection(backup_collection_name)
+                backup_data = backup_collection.get()
+                
+                if not backup_data['ids']:
+                    logger.warning("⚠️ Backup collection is empty")
+                    return False
+                
+                # Delete current collection if it exists
+                try:
+                    chroma_client.delete_collection(current_collection_name)
+                except Exception:
+                    pass
+                
+                # Create new current collection from backup with NO embedding function
+                current_collection = chroma_client.create_collection(
+                    current_collection_name, 
+                    embedding_function=None
+                )
+                
+                # Check if data exists (avoid ambiguous truth value error)
+                has_backup_embeddings = backup_data.get('embeddings') is not None and len(backup_data.get('embeddings', [])) > 0
+                has_backup_metadatas = backup_data.get('metadatas') is not None and len(backup_data.get('metadatas', [])) > 0
+                has_backup_documents = backup_data.get('documents') is not None and len(backup_data.get('documents', [])) > 0
+                
+                # Add backup data in batches with explicit embeddings
+                batch_size = 100
+                for i in range(0, len(backup_data['ids']), batch_size):
+                    end_idx = min(i + batch_size, len(backup_data['ids']))
+                    
+                    current_collection.add(
+                        ids=backup_data['ids'][i:end_idx],
+                        embeddings=backup_data['embeddings'][i:end_idx] if has_backup_embeddings else None,
+                        metadatas=backup_data['metadatas'][i:end_idx] if has_backup_metadatas else None,
+                        documents=backup_data['documents'][i:end_idx] if has_backup_documents else None
+                    )
+                
+                # Update service to use restored collection
+                self.vector_store = ChromaVectorStore(chroma_collection=current_collection)
+                storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+                self.index = VectorStoreIndex([], storage_context=storage_context)
+                self._setup_query_engine()
+                
+                logger.info(f"✅ Restored from backup with {len(backup_data['ids'])} documents")
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Could not restore from backup: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error in restore process: {e}")
+            return False
+
+    def get_rebuild_capabilities(self) -> dict:
+        """Get information about rebuild capabilities and current state"""
+        try:
+            chroma_client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            
+            # Check what collections exist
+            collections = chroma_client.list_collections()
+            collection_names = [col.name for col in collections]
+            
+            # Check current index state
+            current_stats = self.get_index_stats()
+            
+            return {
+                "zero_downtime_rebuild": True,
+                "current_index_status": current_stats.get("status", "unknown"),
+                "current_document_count": current_stats.get("document_count", 0),
+                "available_collections": collection_names,
+                "has_backup": "devcon_documents_hf_client_backup" in collection_names,
+                "temp_build_in_progress": hasattr(self, 'temp_index') and self.temp_index is not None,
+                "supported_operations": [
+                    "start_new_index_build",
+                    "add_documents_to_new_index", 
+                    "replace_index_with_new",
+                    "cleanup_failed_index_build",
+                    "restore_from_backup"
+                ]
+            }
+            
+        except Exception as e:
+            return {
+                "zero_downtime_rebuild": False,
+                "error": str(e)
+            }
+
     
     def test_embedding(self, text: str = "This is a test sentence.") -> dict:
         """Test the embedding model"""
@@ -775,6 +1287,85 @@ class LlamaIndexRAGService:
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
+        
+
+    def clear_index(self) -> bool:
+        """Completely clear the RAG index and reset its state"""
+        try:
+            # Clear the ChromaDB collection
+            chroma_client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            collection_name = "devcon_documents_hf_client"
+            try:
+                chroma_client.delete_collection(collection_name)
+                print(f"✅ Deleted ChromaDB collection: {collection_name}")
+            except Exception as e:
+                print(f"⚠️ Could not delete collection: {e}. Creating new one anyway.")
+            
+            # Clear the ChromaDB persistent storage directory completely
+            chroma_persist_dir = Path(settings.CHROMA_PERSIST_DIR)
+            if chroma_persist_dir.exists():
+                import shutil
+                try:
+                    shutil.rmtree(chroma_persist_dir)
+                    print(f"✅ Deleted ChromaDB storage directory: {chroma_persist_dir}")
+                    # Recreate the directory
+                    chroma_persist_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    print(f"⚠️ Could not delete ChromaDB storage directory: {e}")
+                    # Try to delete individual collection folders
+                    for item in chroma_persist_dir.iterdir():
+                        if item.is_dir():
+                            try:
+                                shutil.rmtree(item)
+                                print(f"✅ Deleted ChromaDB collection folder: {item.name}")
+                            except Exception as folder_error:
+                                print(f"⚠️ Could not delete folder {item.name}: {folder_error}")
+            
+            # Clear the index storage directory (LlamaIndex storage)
+            storage_dir = Path(settings.RAG_INDEX_DIR)
+            if storage_dir.exists():
+                import shutil
+                try:
+                    shutil.rmtree(storage_dir)
+                    print(f"✅ Deleted LlamaIndex storage at {storage_dir}")
+                except Exception as e:
+                    print(f"⚠️ Could not delete LlamaIndex storage: {e}")
+            
+            # Reset index state file
+            self.index_state = {}
+            if self.index_state_file.exists():
+                try:
+                    self.index_state_file.unlink()
+                    print(f"✅ Deleted index state file: {self.index_state_file}")
+                except Exception as e:
+                    print(f"⚠️ Could not delete index state file: {e}")
+            
+            # Reinitialize ChromaDB client and collection
+            chroma_client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            chroma_collection = chroma_client.create_collection(collection_name, data_loader=None, embedding_function=None)
+            self.vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+            
+            # Reinitialize the index components
+            self.index = None
+            self._load_or_create_index()
+            
+            # Save fresh index state
+            self.save_index_state()
+            
+            print("✅ Index completely cleared and reset - all storage files deleted")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error clearing index: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
 
 # Global instance

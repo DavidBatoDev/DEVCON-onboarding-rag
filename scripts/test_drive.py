@@ -1,8 +1,13 @@
+import sys
+import os
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.services.drive_loader import list_files
 from app.services.extractor import extract_text
 
 FOLDER_ID = "1eocL8T8BH6EwnP5siOtDz3FG2CqGHveS"  
-files = list_files(FOLDER_ID, max_results=100)
+files = list_files(FOLDER_ID)
 
 print(f"\n🔎 Accessible shared drives: []")
 print(f"Found {len(files)} total files the service account can access:")

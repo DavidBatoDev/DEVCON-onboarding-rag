@@ -1,3 +1,4 @@
+# backend/app/scripts/compile_once.py
 from app.services.drive_loader import list_files
 from app.services.extractor import extract_text
 from app.services.embedder import embed_texts

@@ -1,7 +1,9 @@
+# backend/src/app/services/rag_engine.py
 import google.generativeai as genai
 from app.services.vector_store import load_from_store
 from app.services.embedder import embed_texts
 from app.core.config import settings
+from llama_index.llms.gemini import Gemini
 
 # Configure Gemini
 genai.configure(api_key=settings.GEMINI_API_KEY)

@@ -1,4 +1,4 @@
-
+# backend/src/app/services/vector_store.py
 import os
 import json
 from sklearn.metrics.pairwise import cosine_similarity

@@ -34,3 +34,4 @@ backend/keys/
 *.sw?
 .env
 __pycache__/
+requirements_orig.txt

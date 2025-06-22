@@ -1,3 +1,4 @@
+# backend/src/app/services/embedder.py
 import os
 import requests
 from dotenv import load_dotenv

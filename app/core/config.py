@@ -14,7 +14,7 @@ class Settings:
     HUGGINGFACE_TOKEN = os.getenv("HF_API_TOKEN") or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
     
     # Google Drive Configuration
-    GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "keys/devcon-460307-b6c246eeb117.json")
+    GOOGLE_SERVICE_ACCOUNT_JSON_DATA = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_DATA")
     GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
     
     # RAG Configuration

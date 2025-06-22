@@ -10,6 +10,8 @@ import logging
 import threading
 from datetime import datetime, timedelta
 import time
+from app.core.config import settings
+import os
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -127,6 +129,7 @@ async def rebuild_index(request: RebuildRequest):
         rebuild_state["last_status"] = "in_progress"
 
     try:
+        print("🔄 Starting complete index rebuild from scratch...", )
         logger.info("🔄 Starting complete index rebuild from scratch...")
         start_time = time.time()
         

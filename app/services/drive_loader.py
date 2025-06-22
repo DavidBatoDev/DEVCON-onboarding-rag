@@ -3,16 +3,23 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from app.core.config import settings
 import logging
+import os
+import json
 
 logger = logging.getLogger(__name__)
 
 def get_drive_service():
     """Create and return Google Drive service client"""
     try:
-        creds = service_account.Credentials.from_service_account_file(
-            settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
+        raw = settings.GOOGLE_SERVICE_ACCOUNT_JSON_DATA or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_DATA")
+        scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+
+        # If raw starts with “{”, treat it as JSON; otherwise treat it as a path
+        if raw and raw.strip().startswith("{"):
+            info = json.loads(raw)
+            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        else:
+            creds = service_account.Credentials.from_service_account_file(raw, scopes=scopes)
         service = build("drive", "v3", credentials=creds)
         logger.info("✅ Google Drive service initialized")
         return service

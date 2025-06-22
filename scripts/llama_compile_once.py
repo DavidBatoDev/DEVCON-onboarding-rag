@@ -70,7 +70,7 @@ def validate_environment():
     
     required_settings = [
         ("GEMINI_API_KEY", settings.GEMINI_API_KEY),
-        ("GOOGLE_SERVICE_ACCOUNT_JSON", settings.GOOGLE_SERVICE_ACCOUNT_JSON),
+        ("GOOGLE_SERVICE_ACCOUNT_JSON_DATA", settings.GOOGLE_SERVICE_ACCOUNT_JSON_DATA),
         ("HUGGINGFACE_TOKEN", settings.HUGGINGFACE_TOKEN)
     ]
     

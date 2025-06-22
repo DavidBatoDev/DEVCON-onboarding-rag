@@ -6,6 +6,8 @@ from llama_index.core import (
     StorageContext,
     load_index_from_storage
 )
+from dotenv import load_dotenv
+    
 from llama_index.llms.gemini import Gemini
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.core.node_parser import SentenceSplitter
@@ -31,6 +33,9 @@ import json
 from app.services.prompt_engine import DEVCONPromptEngine 
 
 logger = logging.getLogger(__name__)
+
+
+load_dotenv() 
 
 class HuggingFaceInferenceEmbedding(BaseEmbedding):
     """Custom embedding class using Hugging Face InferenceClient"""

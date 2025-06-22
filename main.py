@@ -1,6 +1,8 @@
 # main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+load_dotenv() 
 from app.api.v1.routes import router as v1_router
 import os
 import socket
@@ -8,6 +10,8 @@ import uvicorn
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
+
+
 
 # Lifespan events for startup/shutdown
 @asynccontextmanager
@@ -37,6 +41,8 @@ def health_check():
         "uptime_seconds": round(uptime, 1),
         "uptime_human": str(timedelta(seconds=int(uptime)))
     }
+
+
 
 # Configure CORS
 app.add_middleware(

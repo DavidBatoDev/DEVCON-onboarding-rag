@@ -14,7 +14,7 @@ from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.response import Response
 from llama_index.core.embeddings import BaseEmbedding
-from typing import List, Optional, Any
+from typing import List, Optional, Dict
 from pydantic import Field
 
 import chromadb
@@ -29,6 +29,7 @@ from huggingface_hub import InferenceClient
 import logging
 import json
 from app.services.prompt_engine import DEVCONPromptEngine 
+
 
 
 
@@ -441,188 +442,248 @@ class LlamaIndexRAGService:
         
         print(f"✅ Query engine configured with similarity_cutoff=0.3, top_k={settings.TOP_K_RETRIEVAL * 2}")
 
-    def _create_custom_engine(self, system_prompt: str):
-        """Create query engine with custom DEVCON prompt"""
-        from llama_index.core import PromptTemplate
-        from llama_index.core.response_synthesizers import get_response_synthesizer
+    def _format_conversation_history(self, history: List[Dict[str, str]]) -> str:
+        """Format conversation history into a readable context string"""
+        if not history:
+            return ""
         
-        # Create the QA template with proper placeholder syntax
-        qa_template_str = (
-            f"{system_prompt}\n\n"
-            "Context information is below:\n"
-            "---------------------\n"
-            "{context_str}\n"
-            "---------------------\n"
-            "Given the context information and not prior knowledge, "
-            "answer the query as a DEVCON chapter officer advisor.\n"
-            "Query: {query_str}\n"
-            "Answer: "
-        )
+        formatted_history = []
+        for msg in history[-5:]:  # Only use last 5 exchanges to avoid token limits
+            role = "User" if msg["role"] == "user" else "Assistant"
+            formatted_history.append(f"{role}: {msg['content']}")
         
-        # Create the PromptTemplate object
-        qa_template = PromptTemplate(qa_template_str)
-        
-        # Create response synthesizer with custom template
-        response_synthesizer = get_response_synthesizer(
-            text_qa_template=qa_template,
-            response_mode="compact"  # Add response mode for better control
-        )
-        
-        # Create retriever
-        retriever = VectorIndexRetriever(
-            index=self.index,
-            similarity_top_k=settings.TOP_K_RETRIEVAL * 2,
-        )
-        
-        # Create postprocessor with relaxed threshold
-        postprocessor = SimilarityPostprocessor(similarity_cutoff=0.25)  # Even more relaxed
-        
-        # Return custom query engine
-        return RetrieverQueryEngine(
-            retriever=retriever,
-            response_synthesizer=response_synthesizer,
-            node_postprocessors=[postprocessor],
-        )
+        return "\n".join(formatted_history)
 
-    def _create_anti_hallucination_engine(self, question: str):
-        """Create query engine specifically designed to prevent hallucinations"""
+    def _create_history_aware_prompt(self, question: str, history: List[Dict[str, str]]) -> str:
+        """Create a context-aware prompt that considers conversation history"""
+        if not history:
+            return question
+        
+        # Format recent conversation
+        conversation_context = self._format_conversation_history(history)
+        
+        # Create enhanced prompt that considers context
+        enhanced_prompt = f"""
+    Previous conversation context:
+    {conversation_context}
+
+    Current question: {question}
+
+    Please provide a helpful response considering the conversation history above. 
+    If the current question refers to something mentioned earlier, use that context.
+    If it's a new topic, focus on the current question.
+    """
+        
+        return enhanced_prompt
+
+    def _create_history_aware_anti_hallucination_engine(self, question: str, history: List[Dict[str, str]] = None):
+        """Create query engine that considers conversation history AND prevents hallucinations"""
         from llama_index.core import PromptTemplate
         from llama_index.core.response_synthesizers import get_response_synthesizer
         
-        # First retrieve relevant nodes
+        # Format conversation history
+        conversation_context = self._format_conversation_history(history) if history else ""
+        
+        # Enhanced query with history context
+        enhanced_query = self._create_history_aware_prompt(question, history) if history else question
+        
+        # First retrieve relevant nodes using enhanced query
         retriever = VectorIndexRetriever(
             index=self.index,
             similarity_top_k=settings.TOP_K_RETRIEVAL * 2,
         )
         
-        nodes = retriever.retrieve(question)
+        nodes = retriever.retrieve(enhanced_query)
         
         if not nodes:
-            return None, "No relevant documents found for your question."
+            return None, "No relevant documents found for your question.", enhanced_query
         
-        # Create context-aware prompt using the prompt engine
-        context_prompt = self.prompt_engine.create_context_aware_prompt(nodes, question)
+        # Create context-aware prompt using the prompt engine if available
+        if hasattr(self, 'prompt_engine') and self.prompt_engine:
+            context_prompt = self.prompt_engine.create_context_aware_prompt(nodes, question)
         
-        # Create a more flexible QA template with emojis
+        # Updated QA template with reference decision logic
         qa_template_str = """🤖 You are the DEVCON Officers' Onboarding Assistant! 
 
-Below is some context retrieved from documents. If it's helpful to answer the question or query, feel free to use it. Otherwise, ignore it and provide your best guidance as a DEVCON advisor! 📖✨
+    {conversation_history}
 
-Context:
-{context_str}
+    Below is some context retrieved from documents. If it's helpful to answer the current question, use it. If the context isn't directly relevant, provide your best guidance as a DEVCON advisor while being honest about what information is available.
 
-Question: {query_str}
+    Context from documents:
+    {context_str}
 
-💡 Remember to:
-- Use emojis to make responses engaging 😊
-- Reference context naturally when it's helpful
-- Be practical and actionable for chapter officers 🎯
-- If context isn't relevant, provide general DEVCON guidance instead!
+    Current question: {query_str}
 
-Answer:"""
+    💡 Instructions:
+    - Consider the conversation history when answering
+    - If the question refers to something mentioned earlier, acknowledge that context
+    - Use emojis to make responses engaging 😊
+    - Be practical and actionable for chapter officers 🎯
+    - If context from documents isn't relevant, provide general DEVCON guidance
+    - Be honest if you don't have specific information - don't make things up!
+    - If the current question is related to previous ones, provide a cohesive response
+
+    🔍 Reference Decision:
+    At the end of your response, add EXACTLY ONE of these markers:
+    - Add "SHOW_REFERENCES: true" if your answer is based on or references specific information from the provided documents
+    - Add "SHOW_REFERENCES: false" if your answer is general guidance not specifically from the documents
+
+    Answer:"""
         
-        qa_template = PromptTemplate(qa_template_str)
+        # Insert conversation history into template
+        if conversation_context:
+            formatted_template = qa_template_str.replace(
+                "{conversation_history}", 
+                f"Recent conversation:\n{conversation_context}\n"
+            )
+        else:
+            formatted_template = qa_template_str.replace("{conversation_history}\n", "")
         
-        # Create response synthesizer with strict template
+        qa_template = PromptTemplate(formatted_template)
+        
+        # Create response synthesizer with history-aware template
         response_synthesizer = get_response_synthesizer(
             text_qa_template=qa_template,
             response_mode="compact"
         )
         
-        # Create postprocessor with higher threshold to ensure relevance
-        postprocessor = SimilarityPostprocessor(similarity_cutoff=0.4)
+        # Create postprocessor with balanced threshold for relevance
+        postprocessor = SimilarityPostprocessor(similarity_cutoff=0.3)
         
         return RetrieverQueryEngine(
             retriever=retriever,
             response_synthesizer=response_synthesizer,
             node_postprocessors=[postprocessor],
-        ), None
+        ), None, enhanced_query
 
-    def query_with_verification(self, question: str) -> str:
-        """Query with built-in hallucination verification"""
+
+    def query_with_history_and_verification(self, question: str, history: List[Dict[str, str]] = None) -> str:
+        """Main query method that handles conversation history AND prevents hallucinations"""
         try:
             if not self.query_engine:
                 return "❌ RAG system not initialized. Please add documents first."
             
-            # Enhanced query processing
-            enhanced_question = self.prompt_engine.enhance_query(question)
+            if history is None:
+                history = []
+            
+            print(f"🔍 Processing query with {len(history)} history messages")
+            
+            # Enhanced query processing with history context
+            if history:
+                enhanced_question = self._create_history_aware_prompt(question, history)
+            else:
+                # Use prompt engine if available for single queries
+                if hasattr(self, 'prompt_engine') and self.prompt_engine:
+                    enhanced_question = self.prompt_engine.enhance_query(question)
+                else:
+                    enhanced_question = question
+            
             print(f"🔍 Enhanced query: {enhanced_question}")
 
-            # Create anti-hallucination engine
-            custom_engine, error = self._create_anti_hallucination_engine(enhanced_question)
+            # Create history-aware anti-hallucination engine
+            custom_engine, error, final_query = self._create_history_aware_anti_hallucination_engine(question, history)
             
             if error:
                 return f"❌ {error}"
             
-            # Query with verification-focused engine
-            print("🚀 Querying with anti-hallucination safeguards...")
-            response = custom_engine.query(enhanced_question)
+            # Query with both history context and verification safeguards
+            print("🚀 Querying with conversation history context and anti-hallucination safeguards...")
+            response = custom_engine.query(final_query)
             
             # Verify response quality
             if not response.response or response.response.strip() in ["Empty Response", "", "I don't know"]:
                 return "❌ I don't have enough relevant information in the available documents to answer your question accurately."
             
-            # Check for low-confidence responses
+            # Check for low-confidence responses (this is actually good - shows honesty)
             if any(phrase in response.response.lower() for phrase in [
                 "i don't have that information",
                 "not mentioned in the context",
                 "the provided documents don't contain"
             ]):
-                # This is actually good - the model is being honest about limitations
+                # Model is being appropriately cautious - this is good behavior
                 pass
             
-            # Format response with source attribution
-            answer = f"{response.response}\n\n"
+            # Parse the show_reference decision from the response
+            response_text = response.response
+            show_references = False
             
-            # Add detailed source information
-            if hasattr(response, 'source_nodes') and response.source_nodes:
+            # Look for the reference decision marker
+            if "SHOW_REFERENCES: true" in response_text:
+                show_references = True
+                # Remove the marker from the response
+                response_text = response_text.replace("SHOW_REFERENCES: true", "").strip()
+            elif "SHOW_REFERENCES: false" in response_text:
+                show_references = False
+                # Remove the marker from the response
+                response_text = response_text.replace("SHOW_REFERENCES: false", "").strip()
+            else:
+                # Fallback: if no marker found, default to showing references if we have source nodes
+                show_references = hasattr(response, 'source_nodes') and response.source_nodes
+            
+            # Start building the final answer
+            answer = f"{response_text}\n\n"
+            
+            # Only add source information if the LLM decided to show references
+            if show_references and hasattr(response, 'source_nodes') and response.source_nodes:
                 answer += "📚 **Sources Referenced:**\n"
                 for i, node in enumerate(response.source_nodes[:3], 1):
                     source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
                     file_id = node.metadata.get('file_id')
-                    score = getattr(node, 'score', 0)
                     
-                    answer += f"{i}. {source_info})\n"
+                    answer += f"{i}. {source_info}\n"
                     
                     if file_id:
                         answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
             
+            print(f"🔍 Reference display decision: {show_references}")
             return answer
             
         except Exception as e:
-            print(f"❌ Error in verified query: {e}")
+            print(f"❌ Error in history-aware verified query: {e}")
             import traceback
             traceback.print_exc()
             return f"❌ I encountered an error while processing your question. Please try rephrasing or contact support."
 
-    def _calculate_response_consistency(self, responses: list) -> float:
-        """Calculate consistency score between responses"""
-        if len(responses) < 2:
-            return 1.0
-        
-        # Simple similarity based on shared key phrases
-        # You could use more sophisticated NLP similarity measures
-        consistency_scores = []
-        
-        for i in range(len(responses)):
-            for j in range(i + 1, len(responses)):
-                # Count shared words (simplified)
-                words1 = set(responses[i].lower().split())
-                words2 = set(responses[j].lower().split())
+    # 3. Optional: Add a method to explicitly control reference display
+    def query_with_reference_control(self, question: str, history: List[Dict[str, str]] = None, force_show_references: bool = None) -> str:
+        """Query method with explicit reference display control"""
+        try:
+            # Get the normal response
+            response = self.query_with_history_and_verification(question, history)
+            
+            # If force_show_references is specified, override the LLM's decision
+            if force_show_references is not None:
+                # Remove any existing source section
+                if "📚 **Sources Referenced:**" in response:
+                    response = response.split("📚 **Sources Referenced:**")[0].strip() + "\n\n"
                 
-                if len(words1) + len(words2) == 0:
-                    continue
-                
-                jaccard_sim = len(words1.intersection(words2)) / len(words1.union(words2))
-                consistency_scores.append(jaccard_sim)
-        
-        return sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.0
+                # Add sources if forced to show
+                if force_show_references:
+                    # Re-run query to get source nodes
+                    custom_engine, error, final_query = self._create_history_aware_anti_hallucination_engine(question, history)
+                    if not error:
+                        query_response = custom_engine.query(final_query)
+                        if hasattr(query_response, 'source_nodes') and query_response.source_nodes:
+                            response += "📚 **Sources Referenced:**\n"
+                            for i, node in enumerate(query_response.source_nodes[:3], 1):
+                                source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
+                                file_id = node.metadata.get('file_id')
+                                
+                                response += f"{i}. {source_info}\n"
+                                
+                                if file_id:
+                                    response += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
+            
+            return response
+            
+        except Exception as e:
+            print(f"❌ Error in reference-controlled query: {e}")
+            return f"❌ I encountered an error while processing your question. Please try rephrasing or contact support."
 
-    # Replace the existing query method with this safer version
-    def query(self, question: str) -> str:
-        """Main query method with anti-hallucination measures"""
-        return self.query_with_verification(question)
-
+    # Update the main query method to use the merged functionality
+    def query(self, question: str, history: List[Dict[str, str]] = None) -> str:
+        """Main query method that handles both history and verification"""
+        return self.query_with_history_and_verification(question, history)
 
     def test_retrieval_scores(self, test_query: str = "DEVCON") -> dict:
         """Test retrieval scores to help tune similarity thresholds"""

@@ -1,9 +1,14 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 
+class ChatMessage(BaseModel):
+    role: str  # 'user' or 'assistant'
+    content: str
+
 
 class AskRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000, description="The question to ask the RAG system")
+    history: List[ChatMessage] = []
     top_k: Optional[int] = Field(None, ge=1, le=20, description="Number of relevant chunks to retrieve")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="LLM temperature for response generation")
 

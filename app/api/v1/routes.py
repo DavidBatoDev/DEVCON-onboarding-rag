@@ -74,13 +74,24 @@ def schedule_periodic_refresh(interval_hours=2):
 
 @router.post("/ask", response_model=AskResponse)
 async def ask_question(request: AskRequest):
-    """Ask a question using the RAG system"""
+    """Ask a question using the RAG system with conversation history"""
     try:
         if not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
         logger.info(f"Received query: {request.query}")
-        response = rag_service.query(request.query)
+        logger.info(f"History length: {len(request.history)}")
+        
+        # Convert history to format expected by RAG service
+        history_context = []
+        for msg in request.history:
+            history_context.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+        
+        # Query with history context
+        response = rag_service.query(request.query, history_context)
         
         return AskResponse(answer=response)
     
@@ -188,6 +199,7 @@ async def _refresh_index_background(folder_id: str = None, force_reprocess: bool
             else:
                 # New file
                 file_detail.status = "queued"
+                print(f"New file detected: {file.get('name', 'Unknown')}")
                 files_to_process.append(file)
             
             files_details.append(file_detail)

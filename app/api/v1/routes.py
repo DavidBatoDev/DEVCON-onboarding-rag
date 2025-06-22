@@ -26,6 +26,7 @@ class IndexStatsResponse(BaseModel):
 
 class RefreshRequest(BaseModel):
     folder_id: str = None  # Optional: specific folder to refresh
+    force_reprocess: bool = False  # Added this field
 
 
 class RefreshResponse(BaseModel):
@@ -33,43 +34,42 @@ class RefreshResponse(BaseModel):
     message: str
     processed_files: int = 0
     failed_files: int = 0
+    skipped_files: int = 0
+    total_chunks: int = 0
     files_details: List[Dict[str, Any]] = []
+
+
+class RebuildRequest(BaseModel):
+    folder_id: str = None  # Optional: specific folder to rebuild from
+    batch_size: int = 25  # Batch size for processing
+
+
+class RebuildResponse(BaseModel):
+    status: str
+    message: str
+    processed_files: int = 0
+    failed_files: int = 0
+    total_chunks: int = 0
+    processing_time: float = 0
+    files_details: List[Dict[str, Any]] = []
+
 
 refresh_state = {
     "in_progress": False,
     "last_started": None,
     "last_completed": None,
-    "last_duration": None,
-    "next_scheduled": None
+    "last_duration": None
+}
+
+rebuild_state = {
+    "in_progress": False,
+    "last_started": None,
+    "last_completed": None,
+    "last_duration": None
 }
 
 refresh_lock = threading.Lock()
-
-
-def schedule_periodic_refresh(interval_hours=2):
-    """Schedule periodic index refreshes"""
-    def refresh_worker():
-        while True:
-            try:
-                with refresh_lock:
-                    refresh_state["next_scheduled"] = str(datetime.now() + timedelta(hours=interval_hours))
-                
-                # Wait until next scheduled time
-                time.sleep(interval_hours * 3600)
-                
-                # Start refresh if not already running
-                with refresh_lock:
-                    if not refresh_state["in_progress"]:
-                        logger.info("🚀 Starting scheduled index refresh")
-                        _refresh_index_background()
-            except Exception as e:
-                logger.error(f"Periodic refresh scheduler error: {e}")
-                time.sleep(300)  # Wait 5 minutes before retrying
-    
-    # Start the scheduler thread
-    scheduler_thread = threading.Thread(target=refresh_worker, daemon=True)
-    scheduler_thread.start()
-    logger.info("⏰ Periodic refresh scheduler started")
+rebuild_lock = threading.Lock()
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -121,9 +121,16 @@ async def get_refresh_status():
     """Get current refresh status"""
     return refresh_state
 
+
+@router.get("/rebuild/status")
+async def get_rebuild_status():
+    """Get current rebuild status"""
+    return rebuild_state
+
+
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh_index(request: RefreshRequest, background_tasks: BackgroundTasks):
-    """Refresh the RAG index with latest documents from Google Drive"""
+    """Refresh the RAG index with latest documents from Google Drive (incremental)"""
     with refresh_lock:
         if refresh_state["in_progress"]:
             return RefreshResponse(
@@ -147,6 +154,146 @@ async def refresh_index(request: RefreshRequest, background_tasks: BackgroundTas
         status="started",
         message="Index refresh started in background",
     )
+
+
+@router.post("/rebuild", response_model=RebuildResponse)
+async def rebuild_index(request: RebuildRequest, background_tasks: BackgroundTasks):
+    """Completely rebuild the RAG index from scratch (like compile script)"""
+    with rebuild_lock:
+        if rebuild_state["in_progress"]:
+            return RebuildResponse(
+                status="already_running",
+                message="Rebuild is already in progress",
+            )
+        
+        rebuild_state["in_progress"] = True
+        rebuild_state["last_started"] = str(datetime.now())
+        rebuild_state["last_completed"] = None
+        rebuild_state["last_duration"] = None
+    
+    # Start background task
+    background_tasks.add_task(
+        _rebuild_index_background,
+        request.folder_id,
+        request.batch_size
+    )
+    
+    return RebuildResponse(
+        status="started",
+        message="Index rebuild started in background (complete re-embedding)",
+    )
+
+
+@router.post("/rebuild/sync", response_model=RebuildResponse)
+async def rebuild_index_sync(request: RebuildRequest):
+    """Synchronously rebuild the RAG index from scratch"""
+    try:
+        logger.info("🔄 Starting synchronous index rebuild...")
+        start_time = time.time()
+        
+        # Clear existing index first
+        logger.info("🗑️ Clearing existing index...")
+        rag_service.clear_index()
+        
+        # Get files from Google Drive
+        logger.info("📁 Fetching files from Google Drive...")
+        files = get_drive_files(request.folder_id)
+        logger.info(f"Found {len(files)} files to process")
+        
+        if not files:
+            return RebuildResponse(
+                status="completed",
+                message="No files found to process",
+                processed_files=0,
+                failed_files=0,
+                processing_time=time.time() - start_time
+            )
+        
+        # Process files into LlamaIndex Documents
+        logger.info("🔧 Processing documents...")
+        documents = document_processor.process_drive_files(files)
+        processed_count = len(documents)
+        failed_count = len(files) - processed_count
+        
+        # Calculate total chunks
+        total_chunks = sum(len(doc.text) // 512 + 1 for doc in documents)  # Rough estimate
+        
+        files_details = []
+        for i, file in enumerate(files):
+            status = "processed" if i < processed_count else "failed"
+            chunk_count = len(documents[i].text) // 512 + 1 if i < processed_count else 0
+            
+            files_details.append({
+                "name": file.get("name", "Unknown"),
+                "id": file.get("id", "Unknown"),
+                "status": status,
+                "mime_type": file.get("mimeType", "Unknown"),
+                "chunk_count": chunk_count
+            })
+        
+        if documents:
+            # Build RAG index with batch processing
+            logger.info(f"🚀 Building RAG index with {len(documents)} documents...")
+            logger.info(f"Using batch size: {request.batch_size}")
+            
+            if len(documents) > request.batch_size:
+                # Process in batches
+                total_batches = (len(documents) + request.batch_size - 1) // request.batch_size
+                logger.info(f"Processing in {total_batches} batches")
+                
+                for i in range(0, len(documents), request.batch_size):
+                    batch = documents[i:i + request.batch_size]
+                    batch_num = (i // request.batch_size) + 1
+                    
+                    logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} documents)")
+                    
+                    success = rag_service.add_documents(batch)
+                    if not success:
+                        logger.error(f"Failed to process batch {batch_num}")
+                        break
+                    
+                    # Brief pause between batches for API rate limiting
+                    if batch_num < total_batches:
+                        time.sleep(1)
+            else:
+                # Process all at once
+                success = rag_service.add_documents(documents)
+            
+            processing_time = time.time() - start_time
+            
+            if success:
+                logger.info(f"✅ Index rebuild completed in {processing_time:.2f} seconds")
+                return RebuildResponse(
+                    status="completed",
+                    message=f"Successfully rebuilt index with {processed_count} documents",
+                    processed_files=processed_count,
+                    failed_files=failed_count,
+                    total_chunks=total_chunks,
+                    processing_time=processing_time,
+                    files_details=files_details
+                )
+            else:
+                return RebuildResponse(
+                    status="error",
+                    message="Failed to build index with documents",
+                    processed_files=0,
+                    failed_files=len(files),
+                    processing_time=processing_time,
+                    files_details=files_details
+                )
+        else:
+            return RebuildResponse(
+                status="completed",
+                message="No documents were successfully processed",
+                processed_files=0,
+                failed_files=len(files),
+                processing_time=time.time() - start_time,
+                files_details=files_details
+            )
+    
+    except Exception as e:
+        logger.error(f"Error during synchronous index rebuild: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during rebuild: {str(e)}")
 
 
 async def _refresh_index_background(folder_id: str = None, force_reprocess: bool = False):
@@ -265,16 +412,110 @@ async def _refresh_index_background(folder_id: str = None, force_reprocess: bool
             refresh_state["in_progress"] = False
             refresh_state["last_completed"] = str(datetime.now())
             refresh_state["last_duration"] = duration
+
+
+async def _rebuild_index_background(folder_id: str = None, batch_size: int = 25):
+    """Background task to completely rebuild the index from scratch"""
+    start_time = time.time()
+    processed_files = 0
+    failed_files = 0
+    total_chunks = 0
+    files_details = []
+    
+    try:
+        logger.info("🔄 Starting background index rebuild...")
         
-        return RefreshResponse(
-            status="completed",
-            message=f"Processed {processed_files} files in {duration:.1f} seconds",
-            processed_files=processed_files,
-            failed_files=failed_files,
-            skipped_files=skipped_files,
-            total_chunks=total_chunks,
-            files_details=files_details
-        )
+        # 1. Clear existing index
+        logger.info("🗑️ Clearing existing index...")
+        rag_service.clear_index()
+        
+        # 2. Get files from Google Drive
+        logger.info("📁 Fetching files from Google Drive...")
+        files = get_drive_files(folder_id)
+        logger.info(f"Found {len(files)} files to process")
+        
+        if not files:
+            logger.warning("No files found to process")
+            return
+        
+        # 3. Process files into LlamaIndex Documents
+        logger.info("🔧 Processing documents...")
+        documents = document_processor.process_drive_files(files)
+        processed_files = len(documents)
+        failed_files = len(files) - processed_files
+        
+        # Create file details
+        for i, file in enumerate(files):
+            status = "processed" if i < processed_files else "failed"
+            chunk_count = 0
+            
+            if i < processed_files:
+                # Rough estimate of chunks
+                chunk_count = len(documents[i].text) // 512 + 1
+                total_chunks += chunk_count
+            
+            files_details.append({
+                "name": file.get("name", "Unknown"),
+                "id": file.get("id", "Unknown"),
+                "status": status,
+                "mime_type": file.get("mimeType", "Unknown"),
+                "chunk_count": chunk_count
+            })
+        
+        # 4. Build RAG index with batch processing
+        if documents:
+            logger.info(f"🚀 Building RAG index with {len(documents)} documents...")
+            logger.info(f"Using batch size: {batch_size}")
+            
+            if len(documents) > batch_size:
+                # Process in batches
+                total_batches = (len(documents) + batch_size - 1) // batch_size
+                logger.info(f"Processing in {total_batches} batches")
+                
+                for i in range(0, len(documents), batch_size):
+                    batch = documents[i:i + batch_size]
+                    batch_num = (i // batch_size) + 1
+                    
+                    logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} documents)")
+                    
+                    success = rag_service.add_documents(batch)
+                    if not success:
+                        logger.error(f"Failed to process batch {batch_num}")
+                        break
+                    
+                    # Brief pause between batches for API rate limiting
+                    if batch_num < total_batches:
+                        time.sleep(1)
+            else:
+                # Process all at once
+                success = rag_service.add_documents(documents)
+            
+            if success:
+                logger.info("✅ Background index rebuild completed successfully")
+            else:
+                logger.error("❌ Failed to build index with documents")
+        else:
+            logger.warning("No documents were successfully processed")
+    
+    except Exception as e:
+        logger.error(f"❌ Error during background index rebuild: {e}")
+        # Update error status for all files
+        for detail in files_details:
+            if detail["status"] == "processed":
+                detail["status"] = "failed"
+                detail["error_message"] = str(e)
+                failed_files += 1
+                processed_files -= 1
+    
+    finally:
+        duration = time.time() - start_time
+        with rebuild_lock:
+            rebuild_state["in_progress"] = False
+            rebuild_state["last_completed"] = str(datetime.now())
+            rebuild_state["last_duration"] = duration
+        
+        logger.info(f"Background rebuild completed in {duration:.2f} seconds")
+
 
 @router.post("/refresh/sync", response_model=RefreshResponse)
 async def refresh_index_sync(request: RefreshRequest):
@@ -345,9 +586,11 @@ async def refresh_index_sync(request: RefreshRequest):
 async def clear_index():
     """Clear the RAG index (for testing purposes)"""
     try:
-        # This would need to be implemented in the RAG service
-        # For now, just return success
-        return {"status": "success", "message": "Index cleared (placeholder)"}
+        success = rag_service.clear_index()
+        if success:
+            return {"status": "success", "message": "Index cleared successfully"}
+        else:
+            return {"status": "error", "message": "Failed to clear index"}
     
     except Exception as e:
         logger.error(f"Error clearing index: {e}")

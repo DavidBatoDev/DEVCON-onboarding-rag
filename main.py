@@ -1,6 +1,7 @@
+# main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.routes import router as v1_router, schedule_periodic_refresh  # Add schedule_periodic_refresh
+from app.api.v1.routes import router as v1_router
 import os
 import socket
 import uvicorn
@@ -12,8 +13,7 @@ from datetime import timedelta
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    print("⏰ Starting periodic refresh scheduler...")
-    schedule_periodic_refresh(interval_hours=2)
+    print("🚀 Starting DEVCON RAG API...")
     
     # Track startup time
     app.state.start_time = time.time()

@@ -1,36 +1,75 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.v1.routes import router as v1_router, schedule_periodic_refresh  # Add schedule_periodic_refresh
+import os
+import socket
+import uvicorn
+import time
+from contextlib import asynccontextmanager
+from datetime import timedelta
 
+# Lifespan events for startup/shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("⏰ Starting periodic refresh scheduler...")
+    schedule_periodic_refresh(interval_hours=2)
+    
+    # Track startup time
+    app.state.start_time = time.time()
+    
+    yield
+    
+    # Shutdown
+    print("🔌 Shutting down...")
 
-from app.api.v1.routes import router as v1_router
-
-
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
-def health_check():
-    return {"status": "ok"}
+def root_check():
+    return {"status": "ok", "message": "DEVCON RAG API"}
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    uptime = time.time() - app.state.start_time
+    return {
+        "status": "ok",
+        "uptime_seconds": round(uptime, 1),
+        "uptime_human": str(timedelta(seconds=int(uptime)))
+    }
 
-origins = [
-    "http://localhost:8082",  # your frontend
-]
-
-
-# Enable CORS to allow frontend access
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],  # For development only
     allow_credentials=True,
-    allow_methods=["*"],  
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(v1_router, prefix="/api/v1")
 
+def find_free_port(start_port=8000, end_port=9000):
+    """Find a free port within the given range"""
+    for port in range(start_port, end_port + 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('127.0.0.1', port))
+                return port
+            except OSError:
+                continue
+    return start_port  # Fallback
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, port=8000, host="127.0.0.1")
+    # Find available port
+    port = find_free_port()
+    print(f"🚀 Starting server on port {port}")
+    
+    # Run with auto-reload using import string format
+    uvicorn.run(
+        "main:app",  # Use import string format
+        host="127.0.0.1",
+        port=port,
+        reload=True,
+        timeout_keep_alive=300
+    )

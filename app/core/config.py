@@ -13,9 +13,17 @@ class Settings:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     HUGGINGFACE_TOKEN = os.getenv("HF_API_TOKEN") or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
     
-    # Google Drive Configuration
-    GOOGLE_SERVICE_ACCOUNT_JSON_DATA = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_DATA")
+    # Google Drive Configuration - Method 3: Individual Variables
+    GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
+    GOOGLE_CLIENT_EMAIL = os.getenv("GOOGLE_CLIENT_EMAIL")
+    GOOGLE_PRIVATE_KEY_ID = os.getenv("GOOGLE_PRIVATE_KEY_ID")
+    GOOGLE_PRIVATE_KEY = os.getenv("GOOGLE_PRIVATE_KEY")
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
     GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    
+    # Google Drive Configuration - Fallback methods (keep for compatibility)
+    GOOGLE_SERVICE_ACCOUNT_JSON_DATA = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_DATA")
+    GOOGLE_SERVICE_ACCOUNT_JSON_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_FILE") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
     # RAG Configuration
     RAG_INDEX_DIR = os.getenv("RAG_INDEX_DIR", "app/storage/rag_index")
@@ -48,6 +56,27 @@ class Settings:
     # API Configuration
     API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
     VITE_API_URL = os.getenv("VITE_API_URL", "http://localhost:8000/api/v1/ask")
+    
+    @property
+    def google_service_account_configured(self) -> bool:
+        """Check if Google service account is properly configured using any method"""
+        # Method 3: Individual variables
+        method3_vars = all([
+            self.GOOGLE_PROJECT_ID,
+            self.GOOGLE_CLIENT_EMAIL,
+            self.GOOGLE_PRIVATE_KEY_ID,
+            self.GOOGLE_PRIVATE_KEY,
+            self.GOOGLE_CLIENT_ID
+        ])
+        
+        # Method 1: JSON data
+        method1_configured = bool(self.GOOGLE_SERVICE_ACCOUNT_JSON_DATA)
+        
+        # Method 2: JSON file
+        method2_configured = bool(self.GOOGLE_SERVICE_ACCOUNT_JSON_FILE and 
+                                 os.path.exists(self.GOOGLE_SERVICE_ACCOUNT_JSON_FILE))
+        
+        return method3_vars or method1_configured or method2_configured
 
 
 settings = Settings()

@@ -11,21 +11,46 @@ logger = logging.getLogger(__name__)
 def get_drive_service():
     """Create and return Google Drive service client"""
     try:
-        raw = settings.GOOGLE_SERVICE_ACCOUNT_JSON_DATA or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_DATA")
         scopes = ["https://www.googleapis.com/auth/drive.readonly"]
-
-        # If raw starts with “{”, treat it as JSON; otherwise treat it as a path
-        if raw and raw.strip().startswith("{"):
-            info = json.loads(raw)
-            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        else:
-            creds = service_account.Credentials.from_service_account_file(raw, scopes=scopes)
-        service = build("drive", "v3", credentials=creds)
-        logger.info("✅ Google Drive service initialized")
-        return service
+        
+        # Method 1: Try individual environment variables
+        project_id = getattr(settings, 'GOOGLE_PROJECT_ID', None) or os.getenv("GOOGLE_PROJECT_ID")
+        client_email = getattr(settings, 'GOOGLE_CLIENT_EMAIL', None) or os.getenv("GOOGLE_CLIENT_EMAIL")
+        private_key = getattr(settings, 'GOOGLE_PRIVATE_KEY', None) or os.getenv("GOOGLE_PRIVATE_KEY")
+        private_key_id = getattr(settings, 'GOOGLE_PRIVATE_KEY_ID', None) or os.getenv("GOOGLE_PRIVATE_KEY_ID")
+        client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None) or os.getenv("GOOGLE_CLIENT_ID")
+        
+        if all([project_id, client_email, private_key, private_key_id, client_id]):
+            # Format the private key properly (add BEGIN/END markers if missing)
+            if not private_key.startswith("-----BEGIN PRIVATE KEY-----"):
+                private_key = f"-----BEGIN PRIVATE KEY-----\n{private_key}\n-----END PRIVATE KEY-----"
+            
+            # Create service account info dictionary
+            service_account_info = {
+                "type": "service_account",
+                "project_id": project_id,
+                "private_key_id": private_key_id,
+                "private_key": private_key,
+                "client_email": client_email,
+                "client_id": client_id,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{client_email.replace('@', '%40')}",
+                "universe_domain": "googleapis.com"
+            }
+            
+            creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
+            logger.info("✅ Google Drive service initialized using individual environment variables")
+            return build("drive", "v3", credentials=creds)
+        
+        # If none of the methods work, raise an error
+        raise ValueError("No valid Google service account configuration found. Please check your environment variables.")
+        
     except Exception as e:
         logger.error(f"❌ Error initializing Google Drive service: {e}")
         raise
+
 
 def get_drive_files(folder_id: str = None):
     """

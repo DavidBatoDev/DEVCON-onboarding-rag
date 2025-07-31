@@ -509,40 +509,50 @@ class LlamaIndexRAGService:
         
         nodes = retriever.retrieve(enhanced_query)
         
+        # Check if we have meaningful context
+        has_relevant_context = bool(nodes) and any(
+            node.text.strip() for node in nodes if node.text.strip()
+        )
+        
         if not nodes:
             return None, "No relevant documents found for your question.", enhanced_query
         
-        # Create context-aware prompt using the prompt engine if available
+        # Create context-aware prompt using the enhanced prompt engine if available
         if hasattr(self, 'prompt_engine') and self.prompt_engine:
-            context_prompt = self.prompt_engine.create_context_aware_prompt(nodes, question)
+            # Use the enhanced context prompt that handles both scenarios
+            context_prompt = self.prompt_engine.create_enhanced_context_prompt(nodes, question, has_relevant_context)
+        else:
+            # Fallback to basic context prompt
+            context_prompt = self._create_basic_context_prompt(nodes, question, has_relevant_context)
         
-        # Updated QA template with reference decision logic
+        # Updated QA template with enhanced context prioritization
         qa_template_str = """🤖 You are the DEVCON Officers' Onboarding Assistant! 
 
-    {conversation_history}
+{conversation_history}
 
-    Below is some context retrieved from documents. If it's helpful to answer the current question, use it. If the context isn't directly relevant, provide your best guidance as a DEVCON advisor while being honest about what information is available.
+{context_prompt}
 
-    Context from documents:
-    {context_str}
+💡 CRITICAL INSTRUCTIONS:
+- 🎯 ALWAYS check the provided context FIRST for relevant information
+- ✅ If context contains helpful information, use it and cite it naturally
+- 🚫 If context is empty, irrelevant, or insufficient, use your general knowledge
+- 📢 When using general knowledge, ALWAYS state: "I don't have specific information about this in the provided documents, but based on general knowledge..."
+- 💡 When using context, mention it naturally: "According to the documents..." or "I found this in the materials..."
+- 🤷 Be honest about information sources - never make up information
+- 😊 Keep responses friendly, helpful, and engaging with emojis
+- 🎯 Focus on being practical and actionable for chapter officers
 
-    Current question: {query_str}
+🔍 SOURCE TRANSPARENCY:
+- If using context: "Based on the provided documents..."
+- If using general knowledge: "I don't have specific information about this in the provided documents, but based on general knowledge..."
+- If unsure: "I don't have enough information to provide a confident answer about this specific topic."
 
-    💡 Instructions:
-    - Consider the conversation history when answering
-    - If the question refers to something mentioned earlier, acknowledge that context
-    - Use emojis to make responses engaging 😊
-    - Be practical and actionable for chapter officers 🎯
-    - If context from documents isn't relevant, provide general DEVCON guidance
-    - Be honest if you don't have specific information - don't make things up!
-    - If the current question is related to previous ones, provide a cohesive response
+🔍 Reference Decision:
+At the end of your response, add EXACTLY ONE of these markers:
+- Add "SHOW_REFERENCES: true" if your answer is based on or references specific information from the provided documents
+- Add "SHOW_REFERENCES: false" if your answer is general guidance not specifically from the documents
 
-    🔍 Reference Decision:
-    At the end of your response, add EXACTLY ONE of these markers:
-    - Add "SHOW_REFERENCES: true" if your answer is based on or references specific information from the provided documents
-    - Add "SHOW_REFERENCES: false" if your answer is general guidance not specifically from the documents
-
-    Answer:"""
+Answer:"""
         
         # Insert conversation history into template
         if conversation_context:
@@ -553,9 +563,12 @@ class LlamaIndexRAGService:
         else:
             formatted_template = qa_template_str.replace("{conversation_history}\n", "")
         
+        # Insert the context prompt
+        formatted_template = formatted_template.replace("{context_prompt}", context_prompt)
+        
         qa_template = PromptTemplate(formatted_template)
         
-        # Create response synthesizer with history-aware template
+        # Create response synthesizer with enhanced template
         response_synthesizer = get_response_synthesizer(
             text_qa_template=qa_template,
             response_mode="compact"
@@ -569,6 +582,43 @@ class LlamaIndexRAGService:
             response_synthesizer=response_synthesizer,
             node_postprocessors=[postprocessor],
         ), None, enhanced_query
+
+    def _create_basic_context_prompt(self, context_nodes, question: str, has_relevant_context: bool) -> str:
+        """Fallback context prompt when prompt engine is not available"""
+        
+        # Extract and format context with source tracking
+        context_with_sources = []
+        for i, node in enumerate(context_nodes, 1):
+            source = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
+            context_with_sources.append(f"[Source {i}: {source}]\n{node.text}\n")
+        
+        full_context = "\n---\n".join(context_with_sources)
+        
+        if has_relevant_context:
+            return f"""I have found relevant information in the provided documents. Use this context as your PRIMARY source:
+
+CONTEXT FROM DOCUMENTS:
+{full_context}
+
+QUESTION: {question}
+
+📋 RESPONSE REQUIREMENTS:
+1. 🎯 Use the context above as your main source of information
+2. ✅ When referencing context, say: "According to the documents..." or "I found this in the materials..."
+3. 😊 Keep responses friendly and engaging with emojis
+4. 🎯 Focus on practical, actionable advice for chapter officers
+5. 📝 Be specific about which parts of the context you're using"""
+        else:
+            return f"""I have checked the available documents but couldn't find specific information related to your question. Provide guidance using general knowledge about DEVCON and chapter management.
+
+QUESTION: {question}
+
+📋 RESPONSE REQUIREMENTS:
+1. 🚫 Start with: "I don't have specific information about this in the provided documents, but based on general knowledge..."
+2. 😊 Keep responses friendly and engaging with emojis
+3. 🎯 Focus on practical, actionable advice for chapter officers
+4. 📝 Be transparent that you're using general knowledge
+5. 🤔 If unsure about something, say so rather than guessing"""
 
 
     def query_with_history_and_verification(self, question: str, history: List[Dict[str, str]] = None) -> str:
@@ -601,7 +651,7 @@ class LlamaIndexRAGService:
                 return f"❌ {error}"
             
             # Query with both history context and verification safeguards
-            print("🚀 Querying with conversation history context and anti-hallucination safeguards...")
+            print("🚀 Querying with conversation history context and enhanced context prioritization...")
             response = custom_engine.query(final_query)
             
             # Verify response quality
@@ -612,7 +662,8 @@ class LlamaIndexRAGService:
             if any(phrase in response.response.lower() for phrase in [
                 "i don't have that information",
                 "not mentioned in the context",
-                "the provided documents don't contain"
+                "the provided documents don't contain",
+                "i don't have specific information about this in the provided documents"
             ]):
                 # Model is being appropriately cautious - this is good behavior
                 pass
@@ -648,6 +699,12 @@ class LlamaIndexRAGService:
                     
                     if file_id:
                         answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
+            
+            # Add information about the response type
+            if show_references:
+                answer += "\n💡 *This response is based on information found in the provided documents.*"
+            else:
+                answer += "\n💡 *This response is based on general knowledge about DEVCON and chapter management.*"
             
             print(f"🔍 Reference display decision: {show_references}")
             return answer

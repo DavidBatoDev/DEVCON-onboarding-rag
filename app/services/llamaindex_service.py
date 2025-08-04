@@ -356,6 +356,28 @@ class LlamaIndexRAGService:
         
         return sanitized
 
+    def _deduplicate_sources(self, source_nodes, max_sources: int = 3):
+        """Deduplicate source nodes based on title and file_id"""
+        seen_sources = set()
+        unique_sources = []
+        
+        for node in source_nodes:
+            source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
+            file_id = node.metadata.get('file_id')
+            
+            # Create a unique identifier for this source
+            source_key = f"{source_info}_{file_id}"
+            
+            if source_key not in seen_sources:
+                seen_sources.add(source_key)
+                unique_sources.append(node)
+            
+            # Limit to max_sources
+            if len(unique_sources) >= max_sources:
+                break
+        
+        return unique_sources
+
     def add_documents(self, documents: List[Document]) -> bool:
         """Add documents to the index with metadata sanitization"""
         try:
@@ -520,17 +542,13 @@ class LlamaIndexRAGService:
         # Create context-aware prompt using the enhanced prompt engine if available
         if hasattr(self, 'prompt_engine') and self.prompt_engine:
             # Use the enhanced context prompt that handles both scenarios
-            context_prompt = self.prompt_engine.create_enhanced_context_prompt(nodes, question, has_relevant_context)
+            context_prompt = self.prompt_engine.create_enhanced_context_prompt(nodes, question, has_relevant_context, conversation_context)
         else:
             # Fallback to basic context prompt
             context_prompt = self._create_basic_context_prompt(nodes, question, has_relevant_context)
         
         # Updated QA template with enhanced context prioritization
-        qa_template_str = """🤖 You are the DEVCON Officers' Onboarding Assistant! 
-
-{conversation_history}
-
-{context_prompt}
+        qa_template_str = """{context_prompt}
 
 💡 CRITICAL INSTRUCTIONS:
 - 🎯 ALWAYS check the provided context FIRST for relevant information
@@ -541,6 +559,9 @@ class LlamaIndexRAGService:
 - 🤷 Be honest about information sources - never make up information
 - 😊 Keep responses friendly, helpful, and engaging with emojis
 - 🎯 Focus on being practical and actionable for chapter officers
+- 🚫 NEVER reintroduce yourself or say "I'm DEBBIE" in continuing conversations
+- 🚫 NEVER start responses with "Hey there" or similar greetings in continuing conversations
+- 💬 If this is a continuing conversation, respond directly to the question without reintroducing yourself
 
 🔍 SOURCE TRANSPARENCY:
 - If using context: "Based on the provided documents..."
@@ -554,17 +575,8 @@ At the end of your response, add EXACTLY ONE of these markers:
 
 Answer:"""
         
-        # Insert conversation history into template
-        if conversation_context:
-            formatted_template = qa_template_str.replace(
-                "{conversation_history}", 
-                f"Recent conversation:\n{conversation_context}\n"
-            )
-        else:
-            formatted_template = qa_template_str.replace("{conversation_history}\n", "")
-        
-        # Insert the context prompt
-        formatted_template = formatted_template.replace("{context_prompt}", context_prompt)
+        # Insert the context prompt (which now includes conversation history if needed)
+        formatted_template = qa_template_str.replace("{context_prompt}", context_prompt)
         
         qa_template = PromptTemplate(formatted_template)
         
@@ -690,21 +702,23 @@ QUESTION: {question}
             
             # Only add source information if the LLM decided to show references
             if show_references and hasattr(response, 'source_nodes') and response.source_nodes:
-                answer += "📚 **Sources Referenced:**\n"
-                for i, node in enumerate(response.source_nodes[:3], 1):
-                    source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
-                    file_id = node.metadata.get('file_id')
-                    
-                    answer += f"{i}. {source_info}\n"
-                    
-                    if file_id:
-                        answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
+                # Use the deduplication helper
+                unique_sources = self._deduplicate_sources(response.source_nodes, max_sources=3)
+                
+                if unique_sources:
+                    answer += "📚 **Sources Referenced:**\n"
+                    for i, node in enumerate(unique_sources, 1):
+                        source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
+                        file_id = node.metadata.get('file_id')
+                        
+                        answer += f"{i}. {source_info}\n"
+                        
+                        if file_id:
+                            answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
             
             # Add information about the response type
             if show_references:
                 answer += "\n💡 *This response is based on information found in the provided documents.*"
-            else:
-                answer += "\n💡 *This response is based on general knowledge about DEVCON and chapter management.*"
             
             print(f"🔍 Reference display decision: {show_references}")
             return answer
@@ -719,33 +733,64 @@ QUESTION: {question}
     def query_with_reference_control(self, question: str, history: List[Dict[str, str]] = None, force_show_references: bool = None) -> str:
         """Query method with explicit reference display control"""
         try:
-            # Get the normal response
-            response = self.query_with_history_and_verification(question, history)
-            
-            # If force_show_references is specified, override the LLM's decision
+            # If force_show_references is specified, we need to control the reference display
             if force_show_references is not None:
-                # Remove any existing source section
-                if "📚 **Sources Referenced:**" in response:
-                    response = response.split("📚 **Sources Referenced:**")[0].strip() + "\n\n"
+                # Get the query engine and response directly to control reference display
+                custom_engine, error, final_query = self._create_history_aware_anti_hallucination_engine(question, history)
+                if error:
+                    return f"❌ Error creating query engine: {error}"
                 
-                # Add sources if forced to show
+                query_response = custom_engine.query(final_query)
+                
+                # Extract the response text without any existing source sections
+                response_text = query_response.response
+                
+                # Remove any existing reference markers
+                response_text = response_text.replace("SHOW_REFERENCES: true", "").replace("SHOW_REFERENCES: false", "").strip()
+                
+                # Start building the final answer
+                answer = f"{response_text}\n\n"
+                
+                # Add sources only if forced to show
+                if force_show_references and hasattr(query_response, 'source_nodes') and query_response.source_nodes:
+                    # Deduplicate sources by tracking unique file_ids
+                    seen_sources = set()
+                    unique_sources = []
+                    
+                    for node in query_response.source_nodes:
+                        source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
+                        file_id = node.metadata.get('file_id')
+                        
+                        # Create a unique identifier for this source
+                        source_key = f"{source_info}_{file_id}"
+                        
+                        if source_key not in seen_sources:
+                            seen_sources.add(source_key)
+                            unique_sources.append(node)
+                        
+                        # Limit to 3 unique sources
+                        if len(unique_sources) >= 3:
+                            break
+                    
+                    if unique_sources:
+                        answer += "📚 **Sources Referenced:**\n"
+                        for i, node in enumerate(unique_sources, 1):
+                            source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
+                            file_id = node.metadata.get('file_id')
+                            
+                            answer += f"{i}. {source_info}\n"
+                            
+                            if file_id:
+                                answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
+                
+                # Add information about the response type
                 if force_show_references:
-                    # Re-run query to get source nodes
-                    custom_engine, error, final_query = self._create_history_aware_anti_hallucination_engine(question, history)
-                    if not error:
-                        query_response = custom_engine.query(final_query)
-                        if hasattr(query_response, 'source_nodes') and query_response.source_nodes:
-                            response += "📚 **Sources Referenced:**\n"
-                            for i, node in enumerate(query_response.source_nodes[:3], 1):
-                                source_info = node.metadata.get('title', node.metadata.get('source', 'Unknown'))
-                                file_id = node.metadata.get('file_id')
-                                
-                                response += f"{i}. {source_info}\n"
-                                
-                                if file_id:
-                                    response += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
-            
-            return response
+                    answer += "\n💡 *This response is based on information found in the provided documents.*"
+                
+                return answer
+            else:
+                # If no force_show_references specified, use the normal method
+                return self.query_with_history_and_verification(question, history)
             
         except Exception as e:
             print(f"❌ Error in reference-controlled query: {e}")

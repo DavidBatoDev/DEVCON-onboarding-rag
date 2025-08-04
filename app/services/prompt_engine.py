@@ -78,7 +78,7 @@ Remember to use emojis 😊 and be helpful while staying accurate to any informa
             
         return enhanced
 
-    def create_context_aware_prompt(self, context_nodes, question: str) -> str:
+    def create_context_aware_prompt(self, context_nodes, question: str, conversation_history: str = None) -> str:
         """Create a prompt that emphasizes context prioritization and source transparency"""
         
         # Check if we have meaningful context
@@ -94,8 +94,12 @@ Remember to use emojis 😊 and be helpful while staying accurate to any informa
         
         full_context = "\n---\n".join(context_with_sources)
         
+        # Determine if this is a new conversation or continuation
+        is_new_conversation = not conversation_history or len(conversation_history.strip()) < 50
+        
         if has_relevant_context:
-            prompt = f"""🤖 Welcome to DEBBIE the DEVCON Officers' Onboarding Assistant! 
+            if is_new_conversation:
+                prompt = f"""🤖 Welcome! I'm DEBBIE, your DEVCON Officers' Onboarding Assistant! 
 
 I have found relevant information in the provided documents. Please use this context to answer the question:
 
@@ -114,9 +118,30 @@ QUESTION: {question}
 Let's help make your chapter awesome! 🚀
 
 ANSWER:"""
+            else:
+                # Continuing conversation - include conversation history but don't reintroduce DEBBIE
+                conversation_section = f"Recent conversation:\n{conversation_history}\n" if conversation_history else ""
+                prompt = f"""{conversation_section}I have found relevant information in the provided documents:
+
+CONTEXT INFORMATION:
+{full_context}
+
+QUESTION: {question}
+
+💡 RESPONSE GUIDELINES:
+1. 📚 Use the context above as your PRIMARY source of information
+2. ✅ Cite the context naturally: "According to the documents..." or "I found this in the materials..."
+3. 😊 Keep responses friendly and engaging with emojis
+4. 🎯 Focus on practical, actionable advice for chapter officers
+5. 📝 Be specific about which parts of the context you're referencing
+6. 🚫 DO NOT reintroduce yourself or say "I'm DEBBIE" - this is a continuing conversation
+7. 🚫 DO NOT start with greetings like "Hey there" - respond directly to the question
+
+ANSWER:"""
         else:
             # No relevant context found - instruct to use general knowledge with transparency
-            prompt = f"""🤖 Welcome to DEBBIE the DEVCON Officers' Onboarding Assistant! 
+            if is_new_conversation:
+                prompt = f"""🤖 Welcome! I'm DEBBIE, your DEVCON Officers' Onboarding Assistant! 
 
 I have checked the available documents but couldn't find specific information related to your question. I will provide guidance based on general knowledge about DEVCON and chapter management.
 
@@ -132,10 +157,27 @@ QUESTION: {question}
 Let's help make your chapter awesome! 🚀
 
 ANSWER:"""
+            else:
+                # Continuing conversation - include conversation history but don't reintroduce DEBBIE
+                conversation_section = f"Recent conversation:\n{conversation_history}\n" if conversation_history else ""
+                prompt = f"""{conversation_section}I have checked the available documents but couldn't find specific information related to your question. I will provide guidance based on general knowledge about DEVCON and chapter management.
+
+QUESTION: {question}
+
+💡 RESPONSE GUIDELINES:
+1. 🚫 Start your response with: "I don't have specific information about this in the provided documents, but based on general knowledge..."
+2. 😊 Keep responses friendly and engaging with emojis
+3. 🎯 Focus on practical, actionable advice for chapter officers
+4. 📝 Provide helpful general guidance while being transparent about the source
+5. 🤔 If you're unsure about something, say so rather than guessing
+6. 🚫 DO NOT reintroduce yourself or say "I'm DEBBIE" - this is a continuing conversation
+7. 🚫 DO NOT start with greetings like "Hey there" - respond directly to the question
+
+ANSWER:"""
         
         return prompt
 
-    def create_enhanced_context_prompt(self, context_nodes, question: str, has_relevant_context: bool = None) -> str:
+    def create_enhanced_context_prompt(self, context_nodes, question: str, has_relevant_context: bool = None, conversation_history: str = None) -> str:
         """Enhanced prompt that explicitly handles context vs general knowledge scenarios"""
         
         if has_relevant_context is None:
@@ -152,8 +194,12 @@ ANSWER:"""
         
         full_context = "\n---\n".join(context_with_sources)
         
+        # Determine if this is a new conversation or continuation
+        is_new_conversation = not conversation_history or len(conversation_history.strip()) < 50
+        
         if has_relevant_context:
-            prompt = f"""🤖 You are DEBBIE the DEVCON Officers' Onboarding Assistant!
+            if is_new_conversation:
+                prompt = f"""🤖 You are DEBBIE the DEVCON Officers' Onboarding Assistant!
 
 I have found relevant information in the provided documents. Use this context as your PRIMARY source:
 
@@ -170,8 +216,29 @@ QUESTION: {question}
 5. 📝 Be specific about which parts of the context you're using
 
 ANSWER:"""
+            else:
+                # Continuing conversation - include conversation history but don't reintroduce DEBBIE
+                conversation_section = f"Recent conversation:\n{conversation_history}\n" if conversation_history else ""
+                prompt = f"""{conversation_section}I have found relevant information in the provided documents. Use this context as your PRIMARY source:
+
+CONTEXT FROM DOCUMENTS:
+{full_context}
+
+QUESTION: {question}
+
+📋 RESPONSE REQUIREMENTS:
+1. 🎯 Use the context above as your main source of information
+2. ✅ When referencing context, say: "According to the documents..." or "I found this in the materials..."
+3. 😊 Keep responses friendly and engaging with emojis
+4. 🎯 Focus on practical, actionable advice for chapter officers
+5. 📝 Be specific about which parts of the context you're using
+6. 🚫 DO NOT reintroduce yourself or say "I'm DEBBIE" - this is a continuing conversation
+7. 🚫 DO NOT start with greetings like "Hey there" - respond directly to the question
+
+ANSWER:"""
         else:
-            prompt = f"""🤖 You are DEBBIE the DEVCON Officers' Onboarding Assistant!
+            if is_new_conversation:
+                prompt = f"""🤖 You are DEBBIE the DEVCON Officers' Onboarding Assistant!
 
 I have checked the available documents but couldn't find specific information related to your question. Provide guidance using general knowledge about DEVCON and chapter management.
 
@@ -183,6 +250,23 @@ QUESTION: {question}
 3. 🎯 Focus on practical, actionable advice for chapter officers
 4. 📝 Be transparent that you're using general knowledge
 5. 🤔 If unsure about something, say so rather than guessing
+
+ANSWER:"""
+            else:
+                # Continuing conversation - include conversation history but don't reintroduce DEBBIE
+                conversation_section = f"Recent conversation:\n{conversation_history}\n" if conversation_history else ""
+                prompt = f"""{conversation_section}I have checked the available documents but couldn't find specific information related to your question. Provide guidance using general knowledge about DEVCON and chapter management.
+
+QUESTION: {question}
+
+📋 RESPONSE REQUIREMENTS:
+1. 🚫 Start with: "I don't have specific information about this in the provided documents, but based on general knowledge..."
+2. 😊 Keep responses friendly and engaging with emojis
+3. 🎯 Focus on practical, actionable advice for chapter officers
+4. 📝 Be transparent that you're using general knowledge
+5. 🤔 If unsure about something, say so rather than guessing
+6. 🚫 DO NOT reintroduce yourself or say "I'm DEBBIE" - this is a continuing conversation
+7. 🚫 DO NOT start with greetings like "Hey there" - respond directly to the question
 
 ANSWER:"""
         

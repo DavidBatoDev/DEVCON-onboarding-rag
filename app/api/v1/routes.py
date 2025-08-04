@@ -17,6 +17,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class ServerStatusResponse(BaseModel):
+    server_up: bool
+    server_running: bool
+    message: str
+
+
+@router.get("/status", response_model=ServerStatusResponse)
+async def get_server_status():
+    """Get server status - simple endpoint to check if server is up and running"""
+    return ServerStatusResponse(
+        server_up=True,
+        server_running=True,
+        message="Server is up and running"
+    )
+
+
 class IndexStatsResponse(BaseModel):
     status: str
     document_count: int
@@ -108,7 +124,14 @@ async def get_index_stats():
     """Get statistics about the current RAG index"""
     try:
         stats = rag_service.get_index_stats()
-        return IndexStatsResponse(**stats)
+        return IndexStatsResponse(
+            status=stats.get("status", "unknown"),
+            document_count=stats.get("document_count", 0),
+            chunk_size=stats.get("chunk_size"),
+            chunk_overlap=stats.get("chunk_overlap"),
+            top_k_retrieval=stats.get("top_k_retrieval"),
+            error=stats.get("error")
+        )
     
     except Exception as e:
         logger.error(f"Error getting index stats: {e}")

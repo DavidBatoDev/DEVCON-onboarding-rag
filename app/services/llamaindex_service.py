@@ -719,9 +719,7 @@ QUESTION: {question}
                         if file_id:
                             answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
             
-            # Add information about the response type
-            if show_references:
-                answer += "\n💡 *This response is based on information found in the provided documents.*"
+            answer += "\n💡I'm currently on Beta and based my answer on available memo documents, FAQs, and links trained as of June 2025. When in doubt, check [https://linktr.ee/fordevconchapterleads](https://linktr.ee/fordevconchapterleads) or  contact HQ hello@devcon.ph for confirmation!*"
             
             print(f"🔍 Reference display decision: {show_references}")
             return answer
@@ -787,8 +785,7 @@ QUESTION: {question}
                                 answer += f"   [[View Document]](https://drive.google.com/file/d/{file_id}/view)\n"
                 
                 # Add information about the response type
-                if force_show_references:
-                    answer += "\n💡 *This response is based on information found in the provided documents.*"
+                answer += "\n💡I'm currently on Beta and based my answer on available memo documents, FAQs, and links trained as of June 2025. When in doubt, check [https://linktr.ee/fordevconchapterleads](https://linktr.ee/fordevconchapterleads) or  contact HQ hello@devcon.ph for confirmation!*"
                 
                 return answer
             else:

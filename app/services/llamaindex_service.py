@@ -484,7 +484,8 @@ class LlamaIndexRAGService:
             return ""
         
         formatted_history = []
-        for msg in history[-5:]:  # Only use last 5 exchanges to avoid token limits
+        # Use more history to better detect continuing conversations
+        for msg in history[-10:]:  # Use last 10 exchanges for better context
             role = "User" if msg["role"] == "user" else "Assistant"
             formatted_history.append(f"{role}: {msg['content']}")
         
@@ -550,28 +551,30 @@ class LlamaIndexRAGService:
         # Updated QA template with enhanced context prioritization
         qa_template_str = """{context_prompt}
 
-💡 CRITICAL INSTRUCTIONS:
-- 🎯 ALWAYS check the provided context FIRST for relevant information
-- ✅ If context contains helpful information, use it and cite it naturally
-- 🚫 If context is empty, irrelevant, or insufficient, use your general knowledge
-- 📢 When using general knowledge, ALWAYS state: "I don't have specific information about this in the provided documents, but based on general knowledge..."
-- 💡 When using context, mention it naturally: "According to the documents..." or "I found this in the materials..."
-- 🤷 Be honest about information sources - never make up information
-- 😊 Keep responses friendly, helpful, and engaging with emojis
-- 🎯 Focus on being practical and actionable for chapter officers
-- 🚫 NEVER reintroduce yourself or say "I'm DEBBIE" in continuing conversations
-- 🚫 NEVER start responses with "Hey there" or similar greetings in continuing conversations
-- 💬 If this is a continuing conversation, respond directly to the question without reintroducing yourself
+💡 CRITICAL RESPONSE RULES:
+1. 🎯 ALWAYS check the provided context FIRST for relevant information
+2. ✅ If context contains helpful information, use it and cite it naturally
+3. 🚫 If context is empty/irrelevant/insufficient, use general knowledge
+4. 📢 When using general knowledge, ALWAYS state: "Based on general knowledge..."
+5. 🤷 Be honest about information sources - never make up information
+6. 😊 Keep responses friendly and helpful with minimal emojis
+7. 🎯 Focus on practical, actionable advice for chapter officers
 
-🔍 SOURCE TRANSPARENCY:
-- If using context: "Based on the provided documents..."
-- If using general knowledge: "I don't have specific information about this in the provided documents, but based on general knowledge..."
-- If unsure: "I don't have enough information to provide a confident answer about this specific topic."
+🚫 STRICT PROHIBITIONS:
+- NEVER reintroduce yourself (no "I'm DEBBIE" or similar)
+- NEVER use greetings like "Hey there" in continuing conversations
+- NEVER mention your name unless explicitly asked
+- Respond directly to the question in continuing conversations
 
-🔍 Reference Decision:
-At the end of your response, add EXACTLY ONE of these markers:
-- Add "SHOW_REFERENCES: true" if your answer is based on or references specific information from the provided documents
-- Add "SHOW_REFERENCES: false" if your answer is general guidance not specifically from the documents
+🔍 SOURCE HANDLING:
+- If using context: "According to the documents..."
+- If using general knowledge: "I don't have specific documentation, but generally..."
+- If unsure: "I don't have enough information about this specific topic"
+
+🔍 REFERENCE DECISION:
+At the end, add EXACTLY ONE marker:
+- "SHOW_REFERENCES: true" if answer references specific documents
+- "SHOW_REFERENCES: false" if using general knowledge
 
 Answer:"""
         

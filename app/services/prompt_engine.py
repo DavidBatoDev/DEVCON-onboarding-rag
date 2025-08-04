@@ -97,6 +97,8 @@ Remember to use emojis 😊 and be helpful while staying accurate to any informa
         # Determine if this is a new conversation or continuation
         is_new_conversation = not conversation_history or len(conversation_history.strip()) < 50
         
+        print(f"is_new_conversation: {is_new_conversation}")
+
         if has_relevant_context:
             if is_new_conversation:
                 prompt = f"""🤖 Welcome! I'm DEBBIE, your DEVCON Officers' Onboarding Assistant! 
